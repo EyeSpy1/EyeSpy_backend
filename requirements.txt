@@ -2,7 +2,7 @@ setuptools>=65.0.0
 wheel>=0.38.0
 streamlit==1.40.1
 uuid==1.30
-opencv-python-headless
+opencv-python-headless==4.7.0.72
 imutils==0.5.4
 cmake==3.25.2
 dlib==19.24.1
