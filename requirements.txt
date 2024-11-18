@@ -4,7 +4,6 @@ streamlit==1.20.0
 uuid==1.30
 opencv-python==4.7.0.72
 imutils==0.5.4
-https://github.com/jloh02/dlib/releases/download/v19.24/dlib-19.24.0-cp312-cp312-win_amd64.whl
-scipy==1.11.4
+dlib>=19.24.0
 pyttsx3==2.90
 numpy==1.23.4
