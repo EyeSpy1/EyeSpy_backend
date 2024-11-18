@@ -1,5 +1,6 @@
 setuptools>=65.0.0
 wheel>=0.38.0
+python==3.9.18
 streamlit==1.40.1
 uuid==1.30
 opencv-python==4.7.0.72
@@ -11,4 +12,5 @@ numpy==1.23.4
 watchdog==6.0.0
 Flask==3.1.0
 wave==0.0.2
+
 
