@@ -1,4 +1,0 @@
-cmake
-build-essential
-libboost-all-dev
-libx11-dev
