@@ -44,7 +44,7 @@ if 'uploaded_file' not in st.session_state:
     st.session_state.uploaded_file = None
 
 # Constants
-THRESHOLD = 0.25
+THRESHOLD = 0.19
 FRAME_CHECK = 20
 BASE_SAVE_PATH = r"C:\Users\Anushree Jain\Drowsiness"
 USER_FOLDER_PATH = os.path.join(BASE_SAVE_PATH, 'user')
