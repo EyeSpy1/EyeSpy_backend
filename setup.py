@@ -9,6 +9,8 @@ setup(
         "streamlit>=1.24.0",
         "setuptools>=61.0",
         "wheel>=0.40.0",
+        "cmake",  # Add this first
+        "dlib",   # Then this will install
     ],
-    python_requires="<=3.12",
+    python_requires=">=3.8,<3.12",
 )
