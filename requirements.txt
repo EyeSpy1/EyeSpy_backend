@@ -9,4 +9,3 @@ imutils==0.5.4
 dlib==19.24.1
 pyttsx3==2.90
 pygame  # Added for audio support
-python-scipy  # Added as required by imutils
