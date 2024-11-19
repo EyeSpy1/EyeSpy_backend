@@ -32,15 +32,15 @@ if 'user_name' not in st.session_state:
 if 'names' not in st.session_state:
     st.session_state.names = []
 if 'camera' not in st.session_state:
-    st.session_state.camera = None
+    st.session_state['camera'] = None
 if 'run_detection' not in st.session_state:
     st.session_state.run_detection = False
 if 'alert_active' not in st.session_state:
-    st.session_state.alert_active = False
+    st.session_state['alert_active'] = False
 if 'last_alert_time' not in st.session_state:
     st.session_state.last_alert_time = 0
 if 'alert_queue' not in st.session_state:
-    st.session_state.alert_queue = queue.Queue()
+    st.session_state['alert_queue'] = queue.Queue()
 if 'flag' not in st.session_state:
     st.session_state.flag = 0
 if 'alert_type' not in st.session_state:
@@ -50,12 +50,7 @@ if 'custom_audio_path' not in st.session_state:
 if 'uploaded_file' not in st.session_state:
     st.session_state.uploaded_file = None
 
-# Constants
-THRESHOLD = 0.25
-FRAME_CHECK = 20
-BASE_SAVE_PATH = r"C:\Users\Anushree Jain\Drowsiness"
-USER_FOLDER_PATH = os.path.join(BASE_SAVE_PATH, 'user')
-ALERT_COOLDOWN = 3
+
 
 # Create base save directory
 try:
@@ -138,19 +133,21 @@ def validate_audio_file(file):
         return False
 
 def cleanup():
-    if st.session_state.camera is not None:
-        st.session_state.camera.release()
-        st.session_state.camera = None
+    if 'camera' in st.session_state and st.session_state['camera'] is not None:
+        st.session_state['camera'].release()
+        st.session_state['camera'] = None
+    if 'alert_queue' in st.session_state:
+        while not st.session_state['alert_queue'].empty():
+            # Process or clear the alert queue
+            st.session_state['alert_queue'].get()
     cv2.destroyAllWindows()
     pygame.mixer.quit()
     st.session_state.run_detection = False
     st.session_state.flag = 0
     st.session_state.alert_active = False
-    while not st.session_state.alert_queue.empty():
-        try:
-            st.session_state.alert_queue.get_nowait()
-        except queue.Empty:
-            break
+    if 'alert_queue' in st.session_state:
+        while not st.session_state['alert_queue'].empty():
+            st.session_state['alert_queue'].get()  # Clear queue safely
 
 def eye_aspect_ratio(eye):
     A = distance.euclidean(eye[1], eye[5])
@@ -193,16 +190,16 @@ def log_event(timestamp, user_name):
 
 def handle_drowsiness_alert(user_name):
     current_time = time.time()
-    if (not st.session_state.alert_active and 
+    if (not st.session_state['alert_active'] and 
         (current_time - st.session_state.last_alert_time) >= ALERT_COOLDOWN):
         
-        st.session_state.alert_active = True
+        st.session_state['alert_active'] = True
         st.session_state.last_alert_time = current_time
         
         timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
         log_event(timestamp, user_name)
         
-        st.session_state.alert_queue.put(True)
+        st.session_state['alert_queue'].put(True)
         play_alert_sound()
 
 def initialize_camera():
@@ -351,8 +348,8 @@ def main():
             st.warning("Please enter your name before starting detection.")
             return
         
-        st.session_state.camera = initialize_camera()
-        if st.session_state.camera is not None:
+        st.session_state['camera'] = initialize_camera()
+        if st.session_state['camera'] is not None:
             st.session_state.run_detection = True
             st.session_state.flag = 0
 
@@ -362,9 +359,9 @@ def main():
         alert_placeholder.empty()
         return
 
-    while st.session_state.run_detection and st.session_state.camera is not None:
+    while st.session_state.run_detection and st.session_state['camera'] is not None:
         try:
-            ret, frame = st.session_state.camera.read()
+            ret, frame = st.session_state['camera'].read()
             if not ret:
                 st.error("Error: Failed to grab frame from webcam.")
                 cleanup()
@@ -422,7 +419,7 @@ def main():
                 handle_drowsiness_alert(st.session_state.user_name)
 
             try:
-                alert = st.session_state.alert_queue.get_nowait()
+                alert = st.session_state['alert_queue'].get_nowait()
                 if alert:
                     alert_placeholder.markdown("""
                     <div style='background-color: #FF4B4B; padding: 20px; border-radius: 10px; text-align: center;'>
@@ -432,7 +429,7 @@ def main():
                     """, unsafe_allow_html=True)
                     time.sleep(2)
                     alert_placeholder.empty()
-                    st.session_state.alert_active = False
+                    st.session_state['alert_active'] = False
             except queue.Empty:
                 pass
 
