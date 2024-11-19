@@ -7,7 +7,7 @@ app = Flask(__name__)
 
 # Start Streamlit app in a separate thread
 def start_streamlit():
-    subprocess.Popen([r"C:\Users\Anushree Jain\AppData\Roaming\Python\Python311\Scripts\streamlit", "run", "app.py"])
+    subprocess.Popen([r"streamlit", "run", "app.py"])
 
 @app.route("/start-detection", methods=["POST"])
 def start_detection():
