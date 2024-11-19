@@ -1,13 +1,13 @@
 from flask import Flask, jsonify, request
 import subprocess
 import threading
-import streamlit.web.bootstrap
+
 
 app = Flask(__name__)
 
 # Start Streamlit app in a separate thread
 def start_streamlit():
-    subprocess.Popen([r"streamlit", "run", "app.py"])
+    subprocess.Popen(["streamlit", "run", "app.py"])
 
 @app.route("/start-detection", methods=["POST"])
 def start_detection():
