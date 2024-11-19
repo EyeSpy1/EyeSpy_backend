@@ -1,6 +1,6 @@
 # Core dependencies with fixed versions
-setuptools>=65.0.0
-wheel>=0.38.0
+setuptools==75.5.0
+wheel>=0.45.0
 scikit-build  # Added for better cmake support
 numpy==1.24
 opencv-python-headless
