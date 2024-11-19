@@ -1,11 +1,12 @@
 # Core dependencies with fixed versions
-setuptools==65.0.0
-wheel==0.38.0
-cmake==3.25.0
-streamlit==1.20.0
-uuid==1.30
+setuptools>=65.0.0
+wheel>=0.38.0
+scikit-build  # Added for better cmake support
+numpy==1.23.4
 opencv-python-headless
+streamlit==1.20.0
 imutils==0.5.4
 dlib==19.24.1
 pyttsx3==2.90
-numpy==1.23.4
+pygame  # Added for audio support
+python-scipy  # Added as required by imutils

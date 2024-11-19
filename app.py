@@ -19,6 +19,13 @@ import contextlib
 import tempfile
 import shutil
 
+# Constants
+THRESHOLD = 0.21
+FRAME_CHECK = 20
+BASE_SAVE_PATH = r"C:\Users\Anushree Jain\Drowsiness"
+USER_FOLDER_PATH = os.path.join(BASE_SAVE_PATH, 'user')
+ALERT_COOLDOWN = 3
+
 # Initialize session state variables
 if 'user_name' not in st.session_state:
     st.session_state.user_name = ""
@@ -44,7 +51,7 @@ if 'uploaded_file' not in st.session_state:
     st.session_state.uploaded_file = None
 
 # Constants
-THRESHOLD = 0.21
+THRESHOLD = 0.25
 FRAME_CHECK = 20
 BASE_SAVE_PATH = r"C:\Users\Anushree Jain\Drowsiness"
 USER_FOLDER_PATH = os.path.join(BASE_SAVE_PATH, 'user')
@@ -60,6 +67,27 @@ except PermissionError:
     except:
         st.error("Unable to create log directory. Please check permissions.")
 
+@st.cache_resource
+def load_face_detector():
+    try:
+        detector = dlib.get_frontal_face_detector()
+        predictor = dlib.shape_predictor("shape_predictor_68_face_landmarks.dat")
+        return detector, predictor
+    except Exception as e:
+        st.error(f"Error loading face detector: {str(e)}")
+        return None, None
+# Initialize pygame
+pygame.init()
+pygame.mixer.init()
+
+# Initialize detector and facial landmarks
+detector, predictor = load_face_detector()
+if detector and predictor:
+    (lStart, lEnd) = face_utils.FACIAL_LANDMARKS_IDXS["left_eye"]
+    (rStart, rEnd) = face_utils.FACIAL_LANDMARKS_IDXS["right_eye"]
+else:
+    st.error("Failed to initialize face detector. Please check if the shape predictor file exists.")
+    st.stop()
 def get_log_file_path(user_name):
     if user_name:
         safe_name = "".join(x for x in user_name if x.isalnum() or x in (' ', '-', '_')).strip()
@@ -131,15 +159,6 @@ def eye_aspect_ratio(eye):
     ear = (A + B) / (2.0 * C)
     return ear
 
-@st.cache_resource
-def load_face_detector():
-    try:
-        detector = dlib.get_frontal_face_detector()
-        predictor = dlib.shape_predictor("shape_predictor_68_face_landmarks.dat")
-        return detector, predictor
-    except Exception as e:
-        st.error(f"Error loading face detector: {str(e)}")
-        return None, None
 
 def log_event(timestamp, user_name):
     try:
@@ -246,7 +265,6 @@ def save_audio_file(user_name, uploaded_file):
     except Exception as e:
         st.error(f"Error saving audio file: {str(e)}")
         return None
-
 # Add to session state initializations at the start of the script
 if 'last_uploaded_content' not in st.session_state:
     st.session_state.last_uploaded_content = None
