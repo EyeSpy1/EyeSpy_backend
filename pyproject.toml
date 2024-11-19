@@ -1,0 +1,25 @@
+[build-system]
+requires = [
+    "setuptools==65.0.0",
+    "wheel==0.38.0",
+    "cmake==3.25.0"
+]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "streamlit-face-app"
+version = "0.1.0"
+description = "Streamlit Face Detection App"
+requires-python = ">=3.8,<3.12"
+dependencies = [
+    "streamlit==1.20.0",
+    "uuid==1.30",
+    "opencv-python-headless",
+    "imutils==0.5.4",
+    "dlib==19.24.1",
+    "pyttsx3==2.90",
+    "numpy==1.23.4",
+]
+
+[tool.setuptools]
+packages = ["."]

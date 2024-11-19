@@ -44,7 +44,7 @@ if 'uploaded_file' not in st.session_state:
     st.session_state.uploaded_file = None
 
 # Constants
-THRESHOLD = 0.19
+THRESHOLD = 0.21
 FRAME_CHECK = 20
 BASE_SAVE_PATH = r"C:\Users\Anushree Jain\Drowsiness"
 USER_FOLDER_PATH = os.path.join(BASE_SAVE_PATH, 'user')
@@ -394,7 +394,7 @@ def main():
 
             if not eyes_visible:
                 cv2.putText(frame, "No face detected", (10, 30),
-                          cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+                          cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 20), 2)
                 st.session_state.flag = 0
 
             frame_placeholder.image(frame, channels="BGR")
