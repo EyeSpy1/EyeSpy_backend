@@ -1,8 +1,8 @@
 [build-system]
 requires = [
-    "setuptools==65.0.0",
-    "wheel==0.38.0",
-    "cmake==3.25.0"
+    "setuptools==75.5.0",
+    "wheel==0.45.0",
+    "cmake==3.30.0"
 ]
 build-backend = "setuptools.build_meta"
 
@@ -18,7 +18,7 @@ dependencies = [
     "imutils==0.5.4",
     "dlib==19.24.1",
     "pyttsx3==2.90",
-    "numpy==1.23.4",
+    "numpy==1.24",
 ]
 
 [tool.setuptools]
