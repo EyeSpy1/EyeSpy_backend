@@ -10,5 +10,5 @@ setup(
         "setuptools>=61.0",
         "wheel>=0.40.0",
     ],
-    python_requires=">=3.8",
+    python_requires="<=3.12",
 )
