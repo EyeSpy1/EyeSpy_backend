@@ -1,3 +1,6 @@
+libsndfile1
+libatlas3-base
+liblapack-dev
 build-essential
 cmake
 ffmpeg

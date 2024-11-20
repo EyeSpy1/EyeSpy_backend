@@ -246,16 +246,69 @@ def handle_drowsiness_alert(user_name):
         st.session_state['alert_queue'].put(True)
         play_alert_sound()
 
+
 def initialize_camera():
+    """
+    Initialize webcam with deployment-specific configurations
+    """
     try:
-        camera = cv2.VideoCapture(0)
+        # Create placeholder for camera status
+        status_placeholder = st.empty()
+        status_placeholder.info("⌛ Initializing camera...")
+        
+        # Initialize camera with specific backend
+        camera = cv2.VideoCapture(0, cv2.CAP_ANY)  # Try any available backend
+        
         if not camera.isOpened():
-            st.error("Error: Unable to access webcam. Please check permissions and connections.")
+            # Try different backend
+            camera = cv2.VideoCapture(0, cv2.CAP_DSHOW)  # DirectShow (Windows)
+            if not camera.isOpened():
+                camera = cv2.VideoCapture(0, cv2.CAP_V4L2)  # Video4Linux (Linux)
+        
+        if not camera.isOpened():
+            status_placeholder.error("📛 Camera access failed. Please:")
+            st.markdown("""
+            1. Refresh the page and allow camera access when prompted
+            2. Check if camera is blocked in browser settings
+            3. Ensure no other apps are using the camera
+            """)
             return None
+            
+        # Configure camera for web deployment
+        camera.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc('M','J','P','G'))
+        camera.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+        camera.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+        camera.set(cv2.CAP_PROP_FPS, 30)
+        camera.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # Minimize latency
+        
+        # Test camera stream
+        ret, frame = camera.read()
+        if not ret or frame is None:
+            status_placeholder.error("📛 Camera stream failed")
+            camera.release()
+            return None
+        
+        status_placeholder.success("✅ Camera ready!")
         return camera
+        
     except Exception as e:
-        st.error(f"Error initializing camera: {str(e)}")
+        st.error(f"Camera error: {str(e)}")
+        if "permission" in str(e).lower():
+            st.info("💡 Please allow camera access in your browser")
         return None
+
+def ensure_camera_cleanup():
+    """
+    Ensure camera is properly released
+    """
+    if 'camera' in st.session_state and st.session_state['camera'] is not None:
+        try:
+            st.session_state['camera'].release()
+        except:
+            pass
+        finally:
+            st.session_state['camera'] = None
+            cv2.destroyAllWindows()
 def save_audio_file(user_name, uploaded_file):
     """
     Save the audio file in the user's folder with proper validation and error handling.
