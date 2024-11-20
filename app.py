@@ -21,7 +21,7 @@ import shutil
 
 # Constants
 THRESHOLD = 0.21
-FRAME_CHECK = 20
+FRAME_CHECK = 15
 BASE_SAVE_PATH = r"C:\Users\Anushree Jain\Drowsiness"
 USER_FOLDER_PATH = os.path.join(BASE_SAVE_PATH, 'user')
 ALERT_COOLDOWN = 3
