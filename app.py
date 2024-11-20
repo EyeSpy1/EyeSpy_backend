@@ -18,7 +18,9 @@ import wave
 import contextlib
 import tempfile
 import shutil
-
+from pydub.utils import mediainfo
+from pathlib import Path
+from pydub import AudioSegment
 # Constants
 THRESHOLD = 0.21
 FRAME_CHECK = 15
@@ -50,7 +52,8 @@ if 'custom_audio_path' not in st.session_state:
 if 'uploaded_file' not in st.session_state:
     st.session_state.uploaded_file = None
 
-
+pygame.init()
+pygame.mixer.init()
 
 # Create base save directory
 try:
@@ -72,8 +75,7 @@ def load_face_detector():
         st.error(f"Error loading face detector: {str(e)}")
         return None, None
 # Initialize pygame
-pygame.init()
-pygame.mixer.init()
+
 
 # Initialize detector and facial landmarks
 detector, predictor = load_face_detector()
@@ -122,15 +124,57 @@ def play_alert_sound():
     except Exception as e:
         st.error(f"Error playing sound: {str(e)}")
 
-def validate_audio_file(file):
+def validate_audio_file(uploaded_file):
+    """
+    Validate the uploaded audio file by checking its format and duration.
+    Returns: (bool, str) - (is_valid, error_message)
+    """
     try:
-        with contextlib.closing(wave.open(file, 'r')) as f:
-            frames = f.getnframes()
-            rate = f.getframerate()
-            duration = frames / float(rate)
-            return duration <= 5
-    except Exception:
-        return False
+        # Create a temporary directory to store the file
+        with tempfile.NamedTemporaryFile(delete=False, suffix=Path(uploaded_file.name).suffix) as temp_file:
+            # Save uploaded file to temporary location
+            temp_file.write(uploaded_file.getvalue())
+            temp_file_path = temp_file.name
+
+            file_extension = uploaded_file.name.split('.')[-1].lower()
+            
+            # Load the audio file using pydub
+            try:
+                if file_extension == 'mp3':
+                    audio = AudioSegment.from_mp3(temp_file_path)
+                elif file_extension == 'wav':
+                    audio = AudioSegment.from_wav(temp_file_path)
+                elif file_extension == 'mp4':
+                    audio = AudioSegment.from_file(temp_file_path, format='mp4')
+                else:
+                    return False, "Unsupported file format. Please use MP3, WAV, or MP4."
+                
+                # Check duration (pydub duration is in milliseconds)
+                duration_seconds = len(audio) / 1000.0
+                
+                if duration_seconds <= 0:
+                    return False, "Invalid audio file: Duration is 0 seconds"
+                elif duration_seconds > 5:
+                    return False, f"Audio file too long: {duration_seconds:.1f} seconds. Maximum allowed is 5 seconds"
+                
+                # Check if file is empty
+                if os.path.getsize(temp_file_path) == 0:
+                    return False, "Invalid audio file: File is empty"
+                
+                return True, "Audio file is valid"
+                
+            except Exception as e:
+                return False, f"Error processing audio file: {str(e)}"
+            
+    except Exception as e:
+        return False, f"Error validating audio file: {str(e)}"
+    finally:
+        # Clean up temporary file
+        try:
+            if 'temp_file_path' in locals():
+                os.unlink(temp_file_path)
+        except Exception:
+            pass
 
 def cleanup():
     if 'camera' in st.session_state and st.session_state['camera'] is not None:
@@ -212,68 +256,57 @@ def initialize_camera():
     except Exception as e:
         st.error(f"Error initializing camera: {str(e)}")
         return None
-
 def save_audio_file(user_name, uploaded_file):
     """
-    Save the audio file inside the user's folder, checking for duplicates by content.
-    Only saves if the file content is different from existing files.
+    Save the audio file in the user's folder with proper validation and error handling.
+    Args:
+        user_name (str): The name of the user
+        uploaded_file: StreamlitUploadedFile object
+    Returns:
+        tuple: (str or None, str) - (saved_file_path, error_message)
     """
     try:
-        if not user_name or not uploaded_file:
-            return None
-            
-        # Create user folder path
-        safe_name = "".join(x for x in user_name if x.isalnum() or x in (' ', '-', '_')).strip()
-        user_folder_path = os.path.join(BASE_SAVE_PATH, 'User', safe_name)
-        os.makedirs(user_folder_path, exist_ok=True)
-        
-        # Get original filename and content
-        original_filename = uploaded_file.name
-        file_content = uploaded_file.getvalue()
-        
-        # Check if file with same content already exists
-        for existing_file in os.listdir(user_folder_path):
-            existing_path = os.path.join(user_folder_path, existing_file)
-            if os.path.isfile(existing_path):
-                try:
-                    with open(existing_path, 'rb') as f:
-                        existing_content = f.read()
-                        if existing_content == file_content:
-                            # File with same content already exists, return its path
-                            return existing_path
-                except Exception:
-                    continue
-        
-        # If no duplicate found, save the new file
-        filename, extension = os.path.splitext(original_filename)
-        counter = 0
-        final_path = os.path.join(user_folder_path, original_filename)
-        
-        while os.path.exists(final_path):
-            counter += 1
-            new_filename = f"{filename}_{counter}{extension}"
-            final_path = os.path.join(user_folder_path, new_filename)
-        
-        with open(final_path, "wb") as f:
-            f.write(file_content)
-            
-        return final_path
-        
-    except Exception as e:
-        st.error(f"Error saving audio file: {str(e)}")
-        return None
-# Add to session state initializations at the start of the script
-if 'last_uploaded_content' not in st.session_state:
-    st.session_state.last_uploaded_content = None
+        # Validate inputs
+        if not user_name or user_name.strip() == "":
+            return None, "Please enter a user name before uploading audio"
+        if not uploaded_file:
+            return None, "No file was uploaded"
 
-# Initialize detector and facial landmarks
-detector, predictor = load_face_detector()
-if detector and predictor:
-    (lStart, lEnd) = face_utils.FACIAL_LANDMARKS_IDXS["left_eye"]
-    (rStart, rEnd) = face_utils.FACIAL_LANDMARKS_IDXS["right_eye"]
-else:
-    st.error("Failed to initialize face detector. Please check if the shape predictor file exists.")
-    st.stop()
+        # Sanitize user name and create folder path
+        safe_name = "".join(x for x in user_name if x.isalnum() or x in (' ', '-', '_')).strip()
+        if not safe_name:
+            return None, "Invalid user name format"
+
+        # Create user's audio folder path
+        user_folder_path = os.path.join(BASE_SAVE_PATH, 'User', safe_name, 'audio')
+        os.makedirs(user_folder_path, exist_ok=True)
+
+        # Get file extension
+        file_extension = Path(uploaded_file.name).suffix.lower()
+        if file_extension not in ['.wav', '.mp3', '.mp4']:
+            return None, f"Unsupported file format:{uploaded_file} {file_extension}"
+
+        # Generate unique filename
+        new_filename = f"{uploaded_file.name}"
+        final_path = os.path.join(user_folder_path, new_filename)
+
+        # Save the file
+        with open(final_path, "wb") as f:
+            f.write(uploaded_file.getvalue())
+
+        # Verify file was saved successfully
+        if not os.path.exists(final_path):
+            return None, "File failed to save"
+        if os.path.getsize(final_path) == 0:
+            os.remove(final_path)
+            return None, "Saved file is empty"
+
+        return final_path, "File saved successfully"
+
+    except PermissionError:
+        return None, "Permission denied when saving file. Please check folder permissions."
+    except Exception as e:
+        return None, f"Error saving file: {str(e)}"
 
 def main():
     st.title("Drowsiness Detection System")
@@ -313,23 +346,22 @@ def main():
         )
     
         if uploaded_file is not None:
-            # Check if this is a new file content
-            current_content = uploaded_file.getvalue()
-            if st.session_state.last_uploaded_content != current_content:
-                try:
-                    saved_path = save_audio_file(st.session_state.user_name, uploaded_file)
+                # First validate the file
+                is_valid, validation_message = validate_audio_file(uploaded_file)
+                
+                if is_valid:
+                    # Save the file if validation passed
+                    saved_path, save_message = save_audio_file(st.session_state.user_name, uploaded_file)
                     
-                    if saved_path and validate_audio_file(saved_path):
+                    if saved_path:
                         st.session_state.custom_audio_path = saved_path
-                        st.session_state.last_uploaded_content = current_content
-                        st.sidebar.success(f"Using audio file: {os.path.basename(saved_path)}")
+                        st.sidebar.success(f"Using: {os.path.basename(saved_path)}")
                     else:
-                        st.sidebar.error("Invalid audio file. Please ensure it's a valid audio file under 5 seconds.")
+                        st.sidebar.error(save_message)
                         st.session_state.custom_audio_path = None
-                        if saved_path and os.path.exists(saved_path):
-                            os.remove(saved_path)
-                except Exception as e:
-                    st.sidebar.error(f"Error processing audio file: {str(e)}")
+                else:
+                    st.sidebar.error(validation_message)
+                    st.session_state.custom_audio_path = None
 
     if st.session_state.user_name:
         current_log_file = get_log_file_path(st.session_state.user_name)

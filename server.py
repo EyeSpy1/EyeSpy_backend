@@ -1,10 +1,10 @@
 from flask import Flask, jsonify, request
 import subprocess
 import threading
-
+from flask_cors import CORS
 
 app = Flask(__name__)
-
+CORS(app)
 # Start Streamlit app in a separate thread
 def start_streamlit():
     subprocess.Popen(["streamlit", "run", "app.py"])

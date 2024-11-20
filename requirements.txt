@@ -7,7 +7,9 @@ opencv-python-headless
 streamlit==1.20.0
 imutils==0.5.4
 cmake==3.30.0
+flask-cors==5.0.0
 dlib==19.24.1
 pyttsx3==2.90
 pygame  # Added for audio support
 scipy==1.11.4
+pydub==0.25.1
