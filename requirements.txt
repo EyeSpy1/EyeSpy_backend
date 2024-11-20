@@ -32,7 +32,7 @@ darglint==1.8.1
 dill==0.3.9
 distlib==0.3.9
 distro==1.9.0
-dlib @ file:///C:/Users/Anushree%20Jain/Drowsiness/dlib-19.24.1-cp311-cp311-win_amd64.whl#sha256=6f1a5ee167975d7952b28e0ce4495f1d9a77644761cf5720fb66d7c6188ae496
+dlib==19.24.1
 dlint==0.16.0
 doc8==1.1.2
 docformatter==1.7.5
