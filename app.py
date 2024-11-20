@@ -356,8 +356,7 @@ def save_audio_file(user_name, uploaded_file):
 
         return final_path, "File saved successfully"
 
-    except PermissionError:
-        return None, "Permission denied when saving file. Please check folder permissions."
+    
     except Exception as e:
         return None, f"Error saving file: {str(e)}"
 
