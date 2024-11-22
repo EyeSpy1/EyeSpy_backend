@@ -28,6 +28,8 @@ BASE_SAVE_PATH = r"C:\Users\Anushree Jain\Drowsiness"
 USER_FOLDER_PATH = os.path.join(BASE_SAVE_PATH, 'user')
 ALERT_COOLDOWN = 3
 
+
+
 # Initialize session state variables
 if 'user_name' not in st.session_state:
     st.session_state.user_name = ""
@@ -52,8 +54,6 @@ if 'custom_audio_path' not in st.session_state:
 if 'uploaded_file' not in st.session_state:
     st.session_state.uploaded_file = None
 
-pygame.init()
-pygame.mixer.init()
 
 # Create base save directory
 try:
@@ -103,7 +103,6 @@ def get_tts_engine():
     except Exception as e:
         st.error(f"Error initializing TTS engine: {str(e)}")
         return None
-
 pygame.init()
 pygame.mixer.init()
 

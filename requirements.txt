@@ -11,7 +11,7 @@ flask-cors==5.0.0
 dlib==19.24.1
 pyttsx3==2.90
 pygame  # Added for audio support
-scipy==1.10.1
+scipy==1.11.4
 pydub==0.25.1
 Pillow==9.5.0
 pathlib==1.0.1
