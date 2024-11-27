@@ -1,22 +1,17 @@
-# Core dependencies with tested compatible versions
+# Core dependencies with fixed versions
 setuptools==75.5.0
 wheel>=0.45.0
-scikit-build==0.17.6
-numpy==1.24.0
-opencv-python-headless==4.7.0.72  # Changed to headless version for cloud deployment
+scikit-build  # Added for better cmake support
+numpy==1.24
+opencv-python==4.7.0.72
 streamlit==1.20.0
 imutils==0.5.4
 cmake==3.30.0
 flask-cors==5.0.0
 dlib==19.24.1
 pyttsx3==2.90
-pygame==2.5.2
+pygame  # Added for audio support
 scipy==1.11.4
 pydub==0.25.1
 Pillow==9.5.0
 pathlib==1.0.1
-wave
-
-# Additional dependencies that might be needed
-python-espeak==0.1.0  # For text-to-speech support
-portaudio19-dev  # For audio support
