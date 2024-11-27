@@ -103,11 +103,17 @@ def get_tts_engine():
     except Exception as e:
         st.error(f"Error initializing TTS engine: {str(e)}")
         return None
-pygame.init()
-pygame.mixer.init()
+try:
+    pygame.init()
+    pygame.mixer.init()
+except pygame.error as e:
+    st.error(f"Pygame mixer initialization error: {e}")
 
 def play_alert_sound():
     try:
+        if not pygame.mixer.get_init():
+            pygame.mixer.init()
+        
         if st.session_state.alert_type == 'tts':
             engine = get_tts_engine()
             if engine:
@@ -510,7 +516,7 @@ def main():
                         <h3 style='color: white; margin: 10px 0;'>Please Wake Up!</h3>
                     </div>
                     """, unsafe_allow_html=True)
-                    time.sleep(2)
+                    time.sleep(1)
                     alert_placeholder.empty()
                     st.session_state['alert_active'] = False
             except queue.Empty:
