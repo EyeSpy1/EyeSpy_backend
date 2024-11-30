@@ -21,12 +21,15 @@ import shutil
 from pydub.utils import mediainfo
 from pathlib import Path
 from pydub import AudioSegment
+import hashlib
+import pandas as pd
 # Constants
-THRESHOLD = 0.21
-FRAME_CHECK = 15
+st.set_page_config(page_title="Drowsiness Detection", layout="wide")
+THRESHOLD = 0.19
+FRAME_CHECK = 16
 BASE_SAVE_PATH = r"C:\Users\Anushree Jain\Drowsiness"
 USER_FOLDER_PATH = os.path.join(BASE_SAVE_PATH, 'user')
-ALERT_COOLDOWN = 3
+ALERT_COOLDOWN = 2
 
 
 
@@ -53,18 +56,127 @@ if 'custom_audio_path' not in st.session_state:
     st.session_state.custom_audio_path = None
 if 'uploaded_file' not in st.session_state:
     st.session_state.uploaded_file = None
+CREDENTIALS_FILE = os.path.join(BASE_SAVE_PATH, 'user_credentials', 'users.csv')
 
+# Ensure user credentials directory exists
+os.makedirs(os.path.dirname(CREDENTIALS_FILE), exist_ok=True)
 
-# Create base save directory
-try:
-    os.makedirs(BASE_SAVE_PATH, exist_ok=True)
-except PermissionError:
-    BASE_SAVE_PATH = os.path.join(os.path.expanduser("~"), "temp_drowsiness_logs")
+# Recreate the CSV file with the new structure
+def reset_credentials_file():
     try:
-        os.makedirs(BASE_SAVE_PATH, exist_ok=True)
-    except:
-        st.error("Unable to create log directory. Please check permissions.")
+        with open(CREDENTIALS_FILE, 'w', newline='') as file:
+            writer = csv.writer(file)
+            writer.writerow(['username', 'password_hash', 'email', 'salt'])
+        print("Credentials file reset successfully.")
+    except Exception as e:
+        print(f"Error resetting credentials file: {e}")
 
+def hash_password(password, salt=None):
+    """
+    Hash the password with a salt
+    """
+    if salt is None:
+        salt = os.urandom(32)  # Generate a random salt
+    
+    # Hash the password with the salt
+    password_hash = hashlib.pbkdf2_hmac(
+        'sha256',  # The hash digest algorithm for HMAC
+        password.encode('utf-8'),  # Convert the password to bytes
+        salt,  # Provide the salt
+        100000  # It is recommended to use at least 100,000 iterations of SHA-256 
+    )
+    
+    return salt, password_hash
+
+def validate_signup(username, password, email):
+    """
+    Validate signup credentials
+    Returns: (bool, str) - (is_valid, error_message)
+    """
+    # Check username
+    if not username or len(username) < 3:
+        return False, "Username must be at least 3 characters long"
+    
+    # Check password
+    if not password or len(password) < 6:
+        return False, "Password must be at least 6 characters long"
+    
+    # Check email (basic validation)
+    if not email or '@' not in email or '.' not in email:
+        return False, "Invalid email format"
+    
+    # Check if username already exists
+    try:
+        users_df = pd.read_csv(CREDENTIALS_FILE)
+        if username in users_df['username'].values:
+            return False, "Username already exists"
+        
+        if email in users_df['email'].values:
+            return False, "Email already registered"
+    except Exception as e:
+        return False, f"Error checking credentials: {str(e)}"
+    
+    return True, "Validation successful"
+
+def signup_user(username, password, email):
+    """
+    Register a new user with secure password hashing
+    Returns: (bool, str) - (is_successful, message)
+    """
+    # Validate credentials
+    is_valid, message = validate_signup(username, password, email)
+    if not is_valid:
+        return False, message
+    
+    try:
+        # Generate salt and hash the password
+        salt, password_hash = hash_password(password)
+        
+        # Append new user to CSV
+        with open(CREDENTIALS_FILE, 'a', newline='') as file:
+            writer = csv.writer(file)
+            writer.writerow([
+                username, 
+                password_hash.hex(),  # Convert to hex string for storage
+                email, 
+                salt.hex()  # Convert salt to hex string for storage
+            ])
+        
+        return True, "Signup successful"
+    except Exception as e:
+        return False, f"Signup failed: {str(e)}"
+
+def login_user(username, password):
+    """
+    Authenticate user with secure password checking
+    Returns: (bool, str) - (is_authenticated, message)
+    """
+    try:
+        # Read users from CSV
+        users_df = pd.read_csv(CREDENTIALS_FILE)
+        
+        # Find user
+        user_row = users_df[users_df['username'] == username]
+        
+        if user_row.empty:
+            return False, "Invalid username or password"
+        
+        # Retrieve stored salt and password hash
+        stored_salt = bytes.fromhex(user_row['salt'].values[0])
+        stored_password_hash = bytes.fromhex(user_row['password_hash'].values[0])
+        
+        # Hash the provided password with the stored salt
+        _, input_password_hash = hash_password(password, stored_salt)
+        
+        # Compare hashes
+        if input_password_hash == stored_password_hash:
+            return True, "Login successful"
+        
+        return False, "Invalid username or password"
+    except Exception as e:
+        # If there's an error with the existing file, reset it
+        reset_credentials_file()
+        return False, f"Login error: {str(e)}. Please try signing up again."
 @st.cache_resource
 def load_face_detector():
     try:
@@ -326,7 +438,7 @@ def save_audio_file(user_name, uploaded_file):
     try:
         # Validate inputs
         if not user_name or user_name.strip() == "":
-            return None, "Please enter a user name before uploading audio"
+            return None, "Please login before uploading audio"
         if not uploaded_file:
             return None, "No file was uploaded"
 
@@ -366,23 +478,73 @@ def save_audio_file(user_name, uploaded_file):
         return None, f"Error saving file: {str(e)}"
 
 def main():
+    
+    # Ensure the credentials file is in the correct format
+    try:
+        pd.read_csv(CREDENTIALS_FILE)
+    except Exception:
+        reset_credentials_file()
+
     st.title("Drowsiness Detection System")
-    st.write("This application detects drowsiness using your webcam.")
-
+    
+    # Authentication method selection
+    if 'logged_in_user' not in st.session_state:
+        # Authentication method selection (only when not logged in)
+        auth_method = st.radio("Select Authentication Method", 
+                                ["Login", "Sign Up"], 
+                                key="auth_method")
+        
+        if auth_method == "Login":
+            # Login Section
+            st.header("Login")
+            user_name = st.text_input("Username", key="login_username")
+            login_password = st.text_input("Password", type="password", key="login_password")
+            
+            if st.button("Login", key="login_button"):
+                authenticated, message = login_user(user_name, login_password)
+                if authenticated:
+                    # Use direct session state modification
+                    st.session_state['logged_in_user'] = user_name
+                    st.session_state['user_name'] = user_name
+                    st.success(message)
+                    st.experimental_rerun()
+                else:
+                    st.error(message)
+        
+        else:
+            # Signup Section
+            st.header("Create New Account")
+            user_name = st.text_input("Choose Username", key="signup_username")
+            new_password = st.text_input("Choose Password", type="password", key="signup_password")
+            new_email = st.text_input("Email Address", key="signup_email")
+            
+            if st.button("Sign Up", key="signup_button"):
+                success, message = signup_user(user_name, new_password, new_email)
+                if success:
+                    st.success(message)
+                else:
+                    st.error(message)
+    
+    # Detection and logged-in content
+    if 'logged_in_user' in st.session_state:
+        # Welcome message
+        st.write(f"Welcome, {st.session_state.logged_in_user}")
+        
+        # Logout button
+        if st.button("Logout"):
+            # Clear the logged-in user state
+            del st.session_state['logged_in_user']
+            # Optional: clear other session states if needed
+            if 'user_name' in st.session_state:
+                del st.session_state['user_name']
+            
+            # Rerun to show login page
+            st.experimental_rerun()
+        
+        # Add your detection logic here (similar to your previous implementation)
     # Add user name input field
-    user_name = st.text_input("Enter your name:", key="user_name_input")
-    if user_name:
-        st.session_state.user_name = user_name
-        if user_name not in st.session_state.names:
-            st.session_state.names.append(user_name)
-
     # Display existing names
-    if st.session_state.names:
-        selected_name = st.selectbox("Or select an existing name:", 
-                                   [""] + st.session_state.names,
-                                   key="name_selector")
-        if selected_name:
-            st.session_state.user_name = selected_name
+    
 
     # Audio alert settings
     st.sidebar.header("Alert Settings")
@@ -418,23 +580,25 @@ def main():
                         st.session_state.custom_audio_path = None
                 else:
                     st.sidebar.error(validation_message)
+    
                     st.session_state.custom_audio_path = None
-
-    if st.session_state.user_name:
+    if 'logged_in_user' in st.session_state:
         current_log_file = get_log_file_path(st.session_state.user_name)
         st.info(f"Logging to: {os.path.basename(current_log_file)}")
+        # Add checkbox to start detection
+       
 
     # Create placeholders for video feed and alerts
     frame_placeholder = st.empty()
     status_placeholder = st.empty()
     alert_placeholder = st.empty()
-
-    # Add checkbox to start detection
     start_detection = st.checkbox("Start Detection", key="detection_checkbox")
+    if 'run_detection' not in st.session_state:
+        st.session_state['run_detection'] = False
 
     if start_detection and not st.session_state.run_detection:
         if not st.session_state.user_name:
-            st.warning("Please enter your name before starting detection.")
+            st.warning("Please login before starting detection.")
             return
         
         st.session_state['camera'] = initialize_camera()
