@@ -1,6 +1,7 @@
 from flask import Flask, jsonify, request
 import subprocess
 import threading
+import psutil  #
 from flask_cors import CORS
 
 app = Flask(__name__)
@@ -8,10 +9,16 @@ app = Flask(__name__)
 # Allow CORS from localhost with specific React port (5173 by default for Vite)
 CORS(app, resources={r"/*": {"origins": "http://localhost:5173"}})
 
-# Start Streamlit app in a separate thread
-def start_streamlit():
-    subprocess.Popen(["streamlit", "run", "app.py"])
 
+def start_streamlit():
+    # Check if Streamlit is already running
+    for process in psutil.process_iter(['pid', 'name']):
+        if 'streamlit' in process.info['name']:
+            print("Streamlit is already running.")
+            return  # Exit the function if Streamlit is already running
+
+    # Start Streamlit if not already running
+    subprocess.Popen(["streamlit", "run", "app.py"])
 @app.route("/")
 def home():
     return jsonify({"message": "Welcome to the EyeSpy Flask server!"})
