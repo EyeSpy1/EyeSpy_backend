@@ -1,8 +1,8 @@
 # Use an official Python runtime as a parent image
 FROM python:3.11-slim
 
-# Install system dependencies required for dlib
-RUN apt-get update && apt-get install -y cmake g++ && rm -rf /var/lib/apt/lists/*
+# Install system dependencies required for dlib and supervisor
+RUN apt-get update && apt-get install -y cmake g++ supervisor && rm -rf /var/lib/apt/lists/*
 
 # Set the working directory inside the container
 WORKDIR /app
@@ -13,8 +13,12 @@ COPY . /app
 # Install Python dependencies
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Expose the port Flask will run on
-EXPOSE 8501
+# Copy the supervisor configuration file
+COPY supervisord.conf /etc/supervisor/conf.d/supervisord.conf
 
-# Command to run the Flask app
-CMD ["python", "server.py"]
+# Expose the ports for Flask and Streamlit
+EXPOSE 8501
+EXPOSE 8502
+
+# Command to start supervisor
+CMD ["supervisord", "-c", "/etc/supervisor/conf.d/supervisord.conf"]

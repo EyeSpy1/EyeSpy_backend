@@ -17,20 +17,19 @@ def start_streamlit():
             print("Streamlit is already running.")
             return  # Exit the function if Streamlit is already running
 
-    # Start Streamlit if not already running
-    subprocess.Popen(["streamlit", "run", "app.py"])
+    # Start Streamlit on port 8502
+    subprocess.Popen(["streamlit", "run", "app.py", "--server.port", "8502"])
 @app.route("/")
 def home():
     return jsonify({"message": "Welcome to the EyeSpy Flask server!"})
 
-@app.route("/start-detection", methods=["POST"])
+
 @app.route("/start-detection", methods=["POST"])
 def start_detection():
     """Starts the Streamlit app."""
     threading.Thread(target=start_streamlit).start()
     # Return the Streamlit app's URL
-    return jsonify({"message": "Streamlit app started", "url": "https://drowsiness-app.onrender.com"}), 200
-
+    return jsonify({"message": "Streamlit app started", "url": "http://localhost:8502"}), 200
 @app.route("/stop-detection", methods=["POST"])
 def stop_detection():
     """Stops the Streamlit app."""
