@@ -24,10 +24,12 @@ def home():
     return jsonify({"message": "Welcome to the EyeSpy Flask server!"})
 
 @app.route("/start-detection", methods=["POST"])
+@app.route("/start-detection", methods=["POST"])
 def start_detection():
     """Starts the Streamlit app."""
     threading.Thread(target=start_streamlit).start()
-    return jsonify({"message": "Streamlit app started"}), 200
+    # Return the Streamlit app's URL
+    return jsonify({"message": "Streamlit app started", "url": "https://drowsiness-app.onrender.com"}), 200
 
 @app.route("/stop-detection", methods=["POST"])
 def stop_detection():
