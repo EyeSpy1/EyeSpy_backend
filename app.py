@@ -26,7 +26,7 @@ import pandas as pd
 # Constants
 st.set_page_config(page_title="Drowsiness Detection", layout="wide")
 THRESHOLD = 0.19
-FRAME_CHECK = 16
+FRAME_CHECK = 15
 BASE_SAVE_PATH = r"C:\Users\Anushree Jain\Drowsiness"
 USER_FOLDER_PATH = os.path.join(BASE_SAVE_PATH, 'user')
 ALERT_COOLDOWN = 2
@@ -35,7 +35,7 @@ ALERT_COOLDOWN = 2
 
 # Initialize session state variables
 if 'user_name' not in st.session_state:
-    st.session_state.user_name = ""
+    st.session_state.user_name = "Enter your name"
 if 'names' not in st.session_state:
     st.session_state.names = []
 if 'camera' not in st.session_state:
