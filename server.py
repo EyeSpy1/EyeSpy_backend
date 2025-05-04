@@ -29,7 +29,7 @@ def start_detection():
     """Starts the Streamlit app."""
     threading.Thread(target=start_streamlit).start()
     # Return the Streamlit app's URL
-    return jsonify({"message": "Streamlit app started", "url": "http://localhost:8502"}), 200
+    return jsonify({"message": "Streamlit app started", "url": "https://drowsiness-app.onrender.com:8502"}), 200
 @app.route("/stop-detection", methods=["POST"])
 def stop_detection():
     """Stops the Streamlit app."""
