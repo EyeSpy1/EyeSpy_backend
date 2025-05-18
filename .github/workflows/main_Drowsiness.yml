@@ -17,7 +17,7 @@ jobs:
     - name: Set up Python
       uses: actions/setup-python@v4
       with:
-        python-version: '3.11'  # Change as per your project
+        python-version: '3.11'  # Adjust to match your needs
 
     - name: Install dependencies
       run: |
@@ -27,6 +27,6 @@ jobs:
     - name: Deploy to Azure Web App
       uses: azure/webapps-deploy@v2
       with:
-        app-name: 'Drowsiness'  # ✅ Replace with your actual Azure App name
-        publish-profile: ${{ secrets.AzureAppService_PublishProfile_359025e82038484790cc6828a414e8bf }}
+        app-name: 'Drowsiness'  # Replace with your actual app name
+        publish-profile: ${{ secrets.AZURE_WEBAPP_PUBLISH_PROFILE }}
         package: .
