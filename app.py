@@ -1,3 +1,4 @@
+# app.py
 import os
 import io
 import cv2
@@ -8,13 +9,10 @@ import hashlib
 import streamlit as st
 from scipy.spatial import distance as dist
 from pydub import AudioSegment
-from streamlit_webrtc import (
-    webrtc_streamer,
-    WebRtcMode,
-    VideoHTMLAttributes,
-    AudioHTMLAttributes,
-)
-import av
+import base64
+import time
+import json
+from datetime import datetime
 
 # --- DB and Model Setup ---
 DB_PATH = "users.db"
@@ -32,6 +30,21 @@ def init_db():
             email TEXT,
             hashed TEXT,
             salt TEXT
+        )
+    """)
+    # Add user_sessions table for storing session data
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS user_sessions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT,
+            session_date TEXT,
+            total_time INTEGER,
+            drowsiness_events INTEGER,
+            avg_ear REAL,
+            min_ear REAL,
+            max_ear REAL,
+            session_data TEXT,
+            FOREIGN KEY (username) REFERENCES users (username)
         )
     """)
     conn.commit()
@@ -61,6 +74,40 @@ def email_exists(email):
     conn.close()
     return exists
 
+def save_session_data(username, session_data):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("""
+        INSERT INTO user_sessions 
+        (username, session_date, total_time, drowsiness_events, avg_ear, min_ear, max_ear, session_data)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    """, (
+        username,
+        session_data['session_date'],
+        session_data['total_time'],
+        session_data['drowsiness_events'],
+        session_data['avg_ear'],
+        session_data['min_ear'],
+        session_data['max_ear'],
+        json.dumps(session_data['ear_history'])
+    ))
+    conn.commit()
+    conn.close()
+
+def get_user_sessions(username):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("""
+        SELECT session_date, total_time, drowsiness_events, avg_ear, min_ear, max_ear
+        FROM user_sessions 
+        WHERE username = ?
+        ORDER BY session_date DESC
+        LIMIT 10
+    """, (username,))
+    rows = c.fetchall()
+    conn.close()
+    return rows
+
 def hash_password(password, salt=None):
     salt = salt or os.urandom(16).hex()
     hashed = hashlib.sha256((password + salt).encode()).hexdigest()
@@ -74,8 +121,7 @@ try:
     detector = dlib.get_frontal_face_detector()
     predictor = dlib.shape_predictor(MODEL_PATH)
     face_detection_ready = True
-except Exception as e:
-    st.error("Landmark model not found or corrupted. Download from [dlib.net](http://dlib.net/files/shape_predictor_68_face_landmarks.dat.bz2), extract, and put in 'models' folder.")
+except Exception:
     face_detection_ready = False
 
 # --- EAR Calculation ---
@@ -85,15 +131,49 @@ def eye_aspect_ratio(eye):
     C = dist.euclidean(eye[0], eye[3])
     return (A + B) / (2.0 * C) if C else 0
 
-# --- Streamlit Session State ---
+# --- Session state defaults ---
 for key, val in [
     ("authenticated", False), ("username", ""), ("counter", 0), ("alarm_on", False),
-    ("debug", False), ("ear_values", []), ("alarm_audio", None), ("alarm_array", None),
-    ("current_ear", 0.0), ("left_ear", 0.0), ("right_ear", 0.0), ("pygame_init", False),
-    ("previous_alarm_state", False)  # Add this to track alarm state changes
+    ("debug", False), ("ear_values", []), ("alarm_array", None), ("camera_running", False),
+    ("current_ear", 0.0), ("left_ear", 0.0), ("right_ear", 0.0), ("custom_audio_b64", None),
+    ("session_start_time", None), ("drowsiness_count", 0), ("ear_history", [])
 ]:
     if key not in st.session_state:
         st.session_state[key] = val
+
+# --- helper: generate beep wav base64 once (for browser embed) ---
+def create_beep_wavbase64(duration_secs=0.8, frequency=880, sample_rate=44100, volume=0.8):
+    t = np.linspace(0, duration_secs, int(sample_rate * duration_secs), False)
+    beep = np.sin(2 * np.pi * frequency * t) * 0.5
+    beep += np.sin(2 * np.pi * frequency * 1.5 * t) * 0.3
+    beep += np.sin(2 * np.pi * frequency * 2.0 * t) * 0.15
+    arr = (beep * 32767).astype(np.int16)
+    raw_bytes = arr.tobytes()
+    audio_seg = AudioSegment(
+        data=raw_bytes,
+        sample_width=2,
+        frame_rate=sample_rate,
+        channels=1
+    )
+    buf = io.BytesIO()
+    audio_seg.export(buf, format="wav")
+    wav_bytes = buf.getvalue()
+    b64 = base64.b64encode(wav_bytes).decode("utf-8")
+    return b64
+
+def audio_file_to_base64(audio_file):
+    try:
+        audio_seg = AudioSegment.from_file(audio_file)
+        buf = io.BytesIO()
+        audio_seg.export(buf, format="wav")
+        wav_bytes = buf.getvalue()
+        b64 = base64.b64encode(wav_bytes).decode("utf-8")
+        return b64
+    except Exception as e:
+        st.error(f"Error processing audio file: {e}")
+        return None
+
+_beep_b64 = create_beep_wavbase64()
 
 # --- Auth UI ---
 if not st.session_state.authenticated:
@@ -139,180 +219,284 @@ if not st.session_state.authenticated:
 else:
     st.title("👁️ Driver Drowsiness Detector")
     st.markdown(f"**Logged in as:** `{st.session_state.username}`")
+
     if not face_detection_ready:
-        st.error("Face detection is not working. Please check the model file.")
+        st.error("Face detection model not found or corrupted. Put 'shape_predictor_68_face_landmarks.dat' in the 'models' folder.")
         st.stop()
 
-    user_dir = os.path.join(USER_DATA_DIR, st.session_state.username)
-    os.makedirs(user_dir, exist_ok=True)
-
-    # --- Sidebar ---
+    # Sidebar
     with st.sidebar:
         st.header("Settings")
         EAR_THRESH = st.slider("Eye Aspect Ratio Threshold", 0.15, 0.40, 0.25, 0.01)
         CONSEC_FRAMES = st.slider("Consecutive Frames", 5, 30, 15, 1)
-        ALARM_VOLUME = st.slider("Alarm Volume", 0.5, 2.0, 1.5, 0.1)  # Higher max volume (2.0)
-        st.session_state.debug = st.checkbox("Debug Mode", value=False)
-        st.write("---")
         
+        st.write("---")
+        st.subheader("Custom Audio")
+        uploaded_audio = st.file_uploader("Upload Custom Alarm Audio", type=['wav', 'mp3', 'ogg', 'flac'])
+        if uploaded_audio is not None:
+            if st.button("Process Audio"):
+                custom_b64 = audio_file_to_base64(uploaded_audio)
+                if custom_b64:
+                    st.session_state.custom_audio_b64 = custom_b64
+                    st.success("Custom audio uploaded successfully!")
+        
+        if st.session_state.custom_audio_b64:
+            if st.button("Reset to Default Audio"):
+                st.session_state.custom_audio_b64 = None
+                st.success("Reset to default beep sound!")
+        
+        st.write("---")
         if st.button("Log Out"):
             st.session_state.authenticated = False
             st.session_state.username = ""
+            st.session_state.camera_running = False
             st.experimental_rerun()
 
-    # --- Check if beep.wav exists ---
-    beep_file = "beep.wav"
-    if not os.path.exists(beep_file):
-        st.warning("beep.wav file not found. Please add it to the application directory.")
-        
-    # Import pygame for audio playback (as a backup method)
-    try:
-        import pygame
-    except ImportError:
-        st.error("Pygame is required to play beep.wav. Install it using 'pip install pygame'.")
-        
-    # Create enhanced alarm sound for WebRTC audio callback
-    def create_beep_sound(duration_secs=1.0, frequency=1000, sample_rate=44100, volume=1.5):
-        t = np.linspace(0, duration_secs, int(sample_rate * duration_secs), False)
-        
-        # Create a more attention-grabbing sound with multiple frequencies
-        beep = np.sin(2 * np.pi * frequency * t) * volume * 32767
-        beep += np.sin(2 * np.pi * frequency * 1.5 * t) * volume * 0.7 * 32767  # Add harmonic
-        beep += np.sin(2 * np.pi * frequency * 2.0 * t) * volume * 0.4 * 32767  # Add another harmonic
-        
-        # Create a more urgent pattern with shorter intervals
-        beep_pattern = np.zeros(int(sample_rate * duration_secs), dtype=np.int16)
-        interval = int(sample_rate * 0.15)  # Shorter interval (0.15s instead of 0.2s)
-        for i in range(0, len(beep_pattern), interval*2):
-            if i + interval <= len(beep_pattern):
-                beep_pattern[i:i+interval] = beep[i:i+interval].astype(np.int16)
-                
-        # Apply volume scaling based on user setting
-        beep_pattern = (beep_pattern * ALARM_VOLUME).astype(np.int16)
-        
-        return beep_pattern
+    # Main content tabs
+    tab1, tab2 = st.tabs(["Live Detection", "Session History"])
+    
+    with tab1:
+        st.markdown("### Live Drowsiness Detection (OpenCV fallback)")
+        st.info("This uses your local webcam via OpenCV. Click 'Start Camera & Detection' then allow camera access.")
 
-    # Create alarm sound with higher volume and urgency
-    alarm_sound = create_beep_sound(duration_secs=2.0, frequency=880, volume=1.5)
-    st.session_state.alarm_array = alarm_sound
+        # Show current status
+        if st.session_state.camera_running:
+            st.success("🟢 Camera is running")
+        else:
+            st.info("🔴 Camera is stopped")
 
-    # --- Video Frame Callback ---
-    def video_frame_callback(frame):
-        img = frame.to_ndarray(format="bgr24")
-        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        h, w = img.shape[:2]
-        faces = detector(gray, 0)
-        ear = 0.0
-        left_ear = 0.0
-        right_ear = 0.0
-
-        if not faces:
-            st.session_state.counter = 0
-            st.session_state.alarm_on = False
-        for face in faces:
-            shape = predictor(gray, face)
-            shape_np = np.array([(shape.part(i).x, shape.part(i).y) for i in range(68)])
-            for (x, y) in shape_np:
-                cv2.circle(img, (x, y), 2, (0, 255, 255), -1)  # Yellow dots
-            left_eye = shape_np[42:48]
-            right_eye = shape_np[36:42]
-            left_ear = eye_aspect_ratio(left_eye)
-            right_ear = eye_aspect_ratio(right_eye)
-            ear = (left_ear + right_ear) / 2.0
-            st.session_state.left_ear = left_ear
-            st.session_state.right_ear = right_ear
-            st.session_state.current_ear = ear
-            cv2.drawContours(img, [left_eye], -1, (0, 255, 0), 1)
-            cv2.drawContours(img, [right_eye], -1, (0, 255, 0), 1)
-            if ear < EAR_THRESH:
-                st.session_state.counter += 1
-                if st.session_state.counter >= CONSEC_FRAMES:
-                    st.session_state.alarm_on = True
-                    overlay = img.copy()
-                    cv2.rectangle(overlay, (0, 0), (w, h), (0, 0, 255), -1)
-                    img = cv2.addWeighted(overlay, 0.3, img, 0.7, 0)
-                    text = "DROWSINESS DETECTED!"
-                    text_size = cv2.getTextSize(text, cv2.FONT_HERSHEY_TRIPLEX, 1.5, 3)[0]
-                    text_x = (w - text_size[0]) // 2
-                    text_y = (h + text_size[1]) // 2
-                    cv2.putText(img, text, (text_x, text_y), cv2.FONT_HERSHEY_TRIPLEX, 1.5, (255, 255, 255), 3)
-                    cv2.rectangle(img, (0, 0), (w, h), (0, 0, 255), 10)
+        # Controls
+        col1, col2 = st.columns(2)
+        with col1:
+            if not st.session_state.camera_running:
+                if st.button("🎥 Start Camera & Detection", key="start_btn"):
+                    st.session_state.camera_running = True
+                    st.session_state.session_start_time = time.time()
+                    st.session_state.drowsiness_count = 0
+                    st.session_state.ear_history = []
+                    st.experimental_rerun()
             else:
-                st.session_state.counter = 0
-                st.session_state.alarm_on = False
-
-        cv2.putText(img, f"EAR: {ear:.2f}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 0), 2)
-        cv2.putText(img, f"L: {left_ear:.2f}  R: {right_ear:.2f}", (10, 55), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 128, 255), 2)
-        cv2.putText(img, f"Counter: {st.session_state.counter}", (10, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 0), 2)
-        return av.VideoFrame.from_ndarray(img, format="bgr24")
-    def audio_frame_callback(frame):
-        frame_sample_rate = frame.sample_rate
-        frame_samples = frame.to_ndarray().shape[1]
-        alarm_samples = st.session_state.alarm_array
+                st.button("🎥 Start Camera & Detection", disabled=True)
         
-        # Immediately play alarm sound when alarm_on is True
-        if st.session_state.alarm_on and alarm_samples is not None and len(alarm_samples) > 0:
-            # Repeat the alarm sound to fill the frame
-            samples_needed = frame_samples
-            repeats = (samples_needed // len(alarm_samples)) + 1
-            out_samples = np.tile(alarm_samples, repeats)[:samples_needed]
-            
-            # Apply the user-set volume
-            out_samples = (out_samples * ALARM_VOLUME).clip(-32768, 32767).astype(np.int16)
-            
-            # Format for output
-            out_samples = out_samples.reshape(1, -1)
-        else:
-            out_samples = np.zeros((1, frame_samples), dtype=np.int16)
-            
-        out_frame = av.AudioFrame.from_ndarray(out_samples, format='s16', layout='mono')
-        out_frame.sample_rate = frame_sample_rate
-        return out_frame
+        with col2:
+            if st.session_state.camera_running:
+                if st.button("⏹️ Stop Camera", key="stop_btn"):
+                    st.session_state.camera_running = False
+                    
+                    # Save session data when stopping
+                    if st.session_state.session_start_time:
+                        session_duration = time.time() - st.session_state.session_start_time
+                        if st.session_state.ear_history:
+                            avg_ear = sum(st.session_state.ear_history) / len(st.session_state.ear_history)
+                            min_ear = min(st.session_state.ear_history)
+                            max_ear = max(st.session_state.ear_history)
+                        else:
+                            avg_ear = min_ear = max_ear = 0.0
+                        
+                        session_data = {
+                            'session_date': datetime.now().isoformat(),
+                            'total_time': int(session_duration),
+                            'drowsiness_events': st.session_state.drowsiness_count,
+                            'avg_ear': avg_ear,
+                            'min_ear': min_ear,
+                            'max_ear': max_ear,
+                            'ear_history': st.session_state.ear_history[-100:]  # Keep last 100 readings
+                        }
+                        save_session_data(st.session_state.username, session_data)
+                        st.success(f"Session saved! Duration: {int(session_duration)}s, Drowsiness events: {st.session_state.drowsiness_count}")
+                    
+                    # Reset session variables
+                    st.session_state.session_start_time = None
+                    st.session_state.drowsiness_count = 0
+                    st.session_state.ear_history = []
+                    st.experimental_rerun()
+            else:
+                st.button("⏹️ Stop Camera", disabled=True)
 
-    # --- Streamlit Layout ---
-    col1, col2 = st.columns([2, 1])
-    with col1:
-        st.markdown("### Live Drowsiness Detection")
-        webrtc_streamer(
-            key="drowsiness_detection",
-            mode=WebRtcMode.SENDRECV,
-            video_frame_callback=video_frame_callback,
-            audio_frame_callback=audio_frame_callback,  # Enable audio output
-            rtc_configuration={"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]},
-            media_stream_constraints={"video": True, "audio": False},  # Disable audio input but allow output
-            video_html_attrs=VideoHTMLAttributes(autoPlay=True, controls=False, muted=False, style={"width": "100%"}),
-            audio_html_attrs=AudioHTMLAttributes(autoPlay=True, controls=True),
-        )
-    with col2:
-        st.markdown("### Status")
-        if st.session_state.alarm_on:
-            st.error("⚠️ **DROWSINESS DETECTED!** ⚠️")
+        # Main camera loop
+        if st.session_state.camera_running:
+            st.info("🎥 Initializing camera...")
+            
+            cap = cv2.VideoCapture(0)
+            if not cap.isOpened():
+                st.error("❌ Cannot open camera (index 0). Close other apps using camera or try a different camera index.")
+                st.session_state.camera_running = False
+                st.experimental_rerun()
+            else:
+                st.success("✅ Camera connected successfully!")
+                
+                try:
+                    # placeholders (create ONCE outside loop)
+                    img_placeholder = st.empty()
+                    status1 = st.empty() 
+                    status2 = st.empty()
+                    audio_placeholder = st.empty()
+
+                    counter = 0
+                    prev_alarm = False
+                    frame_count = 0
+
+                    while st.session_state.camera_running:
+                        ret, frame = cap.read()
+                        if not ret:
+                            st.error("❌ Can't receive frame (stream end?). Stopping camera.")
+                            st.session_state.camera_running = False
+                            break
+
+                        frame_count += 1
+                        
+                        # detection
+                        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                        h, w = frame.shape[:2]
+                        faces = detector(gray, 0)
+                        ear = 0.0
+                        left_ear = 0.0
+                        right_ear = 0.0
+
+                        if not faces:
+                            counter = 0
+                            st.session_state.alarm_on = False
+                        
+                        for face in faces:
+                            shape = predictor(gray, face)
+                            shape_np = np.array([(shape.part(i).x, shape.part(i).y) for i in range(68)])
+                            
+                            # Draw face landmarks
+                            for (x, y) in shape_np:
+                                cv2.circle(frame, (x, y), 2, (0, 255, 255), -1)
+                            
+                            # Extract eye regions
+                            left_eye = shape_np[42:48]
+                            right_eye = shape_np[36:42]
+                            
+                            # Calculate EAR
+                            left_ear = eye_aspect_ratio(left_eye)
+                            right_ear = eye_aspect_ratio(right_eye)
+                            ear = (left_ear + right_ear) / 2.0
+                            
+                            # Update session state
+                            st.session_state.left_ear = left_ear
+                            st.session_state.right_ear = right_ear
+                            st.session_state.current_ear = ear
+                            
+                            # Store EAR history for analytics
+                            st.session_state.ear_history.append(ear)
+                            if len(st.session_state.ear_history) > 1000:  # Keep only last 1000 readings
+                                st.session_state.ear_history = st.session_state.ear_history[-1000:]
+                            
+                            # Draw eye contours
+                            cv2.drawContours(frame, [left_eye], -1, (0, 255, 0), 1)
+                            cv2.drawContours(frame, [right_eye], -1, (0, 255, 0), 1)
+                            
+                            # Drowsiness detection
+                            if ear < EAR_THRESH:
+                                counter += 1
+                                if counter >= CONSEC_FRAMES:
+                                    if not st.session_state.alarm_on:  # New drowsiness event
+                                        st.session_state.drowsiness_count += 1
+                                    st.session_state.alarm_on = True
+                                    
+                                    # Create red overlay for drowsiness
+                                    overlay = frame.copy()
+                                    cv2.rectangle(overlay, (0, 0), (w, h), (0, 0, 255), -1)
+                                    frame = cv2.addWeighted(overlay, 0.3, frame, 0.7, 0)
+                                    
+                                    # Add warning text
+                                    text = "DROWSINESS DETECTED!"
+                                    text_size = cv2.getTextSize(text, cv2.FONT_HERSHEY_TRIPLEX, 1.5, 3)[0]
+                                    text_x = (w - text_size[0]) // 2
+                                    text_y = (h + text_size[1]) // 2
+                                    cv2.putText(frame, text, (text_x, text_y), cv2.FONT_HERSHEY_TRIPLEX, 1.5, (255, 255, 255), 3)
+                                    cv2.rectangle(frame, (0, 0), (w, h), (0, 0, 255), 10)
+                            else:
+                                counter = 0
+                                st.session_state.alarm_on = False
+
+                        # Draw statistics on frame
+                        cv2.putText(frame, f"EAR: {ear:.2f}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 0), 2)
+                        cv2.putText(frame, f"L: {left_ear:.2f}  R: {right_ear:.2f}", (10, 55), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 128, 255), 2)
+                        cv2.putText(frame, f"Counter: {counter}", (10, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 0), 2)
+                        
+                        # Show session info
+                        if st.session_state.session_start_time:
+                            session_time = int(time.time() - st.session_state.session_start_time)
+                            cv2.putText(frame, f"Time: {session_time}s  Events: {st.session_state.drowsiness_count}", (10, 105), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
+                        else:
+                            session_time = 0
+
+                        # Update display (no reflow)
+                        img_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                        img_placeholder.image(img_rgb, use_column_width=True)
+
+                        # Update status
+                        if st.session_state.alarm_on:
+                            status1.error("⚠️ DROWSINESS DETECTED! ⚠️")
+                        else:
+                            status1.success("✅ Monitoring...")
+
+                        status2.markdown(f"**EAR:** `{st.session_state.current_ear:.3f}` **L:** `{st.session_state.left_ear:.3f}` **R:** `{st.session_state.right_ear:.3f}` | **Time:** {session_time}s **Events:** {st.session_state.drowsiness_count}")
+
+                        # Handle audio (only on state change to prevent page jump)
+                        if st.session_state.alarm_on != prev_alarm:
+                            if st.session_state.alarm_on:
+                                # Use custom audio if available, otherwise default beep
+                                audio_b64 = st.session_state.custom_audio_b64 if st.session_state.custom_audio_b64 else _beep_b64
+                                audio_html = f"""
+                                <audio autoplay loop>
+                                  <source src="data:audio/wav;base64,{audio_b64}" type="audio/wav">
+                                  Your browser does not support the audio element.
+                                </audio>
+                                """
+                                audio_placeholder.markdown(audio_html, unsafe_allow_html=True)
+                            else:
+                                audio_placeholder.empty()
+                            prev_alarm = st.session_state.alarm_on
+
+                        # Control frame rate (~30 FPS)
+                        time.sleep(0.03)
+
+                except Exception as e:
+                    st.error(f"❌ Camera loop error: {e}")
+                    st.session_state.camera_running = False
+                finally:
+                    cap.release()
+                    cv2.destroyAllWindows()
+                    if st.session_state.camera_running:
+                        st.session_state.camera_running = False
+                        st.experimental_rerun()
+
         else:
-            st.success("Monitoring...")
-        st.markdown(f"**Current EAR:** `{st.session_state.current_ear:.3f}`")
-        st.markdown(f"**Left EAR:** `{st.session_state.left_ear:.3f}`")
-        st.markdown(f"**Right EAR:** `{st.session_state.right_ear:.3f}`")
-        st.markdown(f"**Counter:** `{st.session_state.counter}`")
-        st.markdown(f"**Alarm Volume:** `{ALARM_VOLUME:.1f}x`")
+            st.info("👆 Click 'Start Camera & Detection' to begin monitoring")
+
+    with tab2:
+        st.markdown("### Session History")
+        sessions = get_user_sessions(st.session_state.username)
         
-        st.info("Yellow dots = landmarks. Green = eyes.")
-
-    st.markdown("---")
-    st.subheader("How to use")
-    st.write("""
-    1. Allow camera and microphone access.
-    2. Position your face clearly in the camera.
-    3. The system will detect if your eyes close for too long.
-    4. An alarm will sound and visual warnings will appear if drowsiness is detected.
-    5. Keep your volume up to hear the alarm.
-    6. Adjust the alarm volume in the settings if needed.
-    """)
-
-    with st.expander("Troubleshooting"):
-        st.write("""
-        - **No face detected**: Make sure your face is clearly visible and well-lit.
-        - **No sound**: Check that your system volume is up and browser audio is not muted.
-        - **False alarms**: Adjust the EAR threshold in the settings.
-        - **No detection**: Try refreshing the page or using a different browser.
-        - **Audio issues**: If you can't hear the alarm, try increasing the alarm volume in settings.
-        """)
+        if sessions:
+            st.markdown("#### Recent Sessions")
+            for i, session in enumerate(sessions):
+                session_date, total_time, drowsiness_events, avg_ear, min_ear, max_ear = session
+                
+                # Parse datetime for better display
+                try:
+                    dt = datetime.fromisoformat(session_date)
+                    formatted_date = dt.strftime("%Y-%m-%d %H:%M:%S")
+                except:
+                    formatted_date = session_date
+                
+                with st.expander(f"Session {i+1}: {formatted_date}"):
+                    col1, col2, col3 = st.columns(3)
+                    with col1:
+                        st.metric("Duration", f"{total_time}s")
+                        st.metric("Drowsiness Events", drowsiness_events)
+                    with col2:
+                        st.metric("Average EAR", f"{avg_ear:.3f}")
+                        st.metric("Min EAR", f"{min_ear:.3f}")
+                    with col3:
+                        st.metric("Max EAR", f"{max_ear:.3f}")
+                        if drowsiness_events > 0:
+                            st.error("⚠️ Drowsiness Detected")
+                        else:
+                            st.success("✅ Good Session")
+        else:
+            st.info("No session data available. Start a detection session to see your history!")

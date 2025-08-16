@@ -1,0 +1,7 @@
+{
+  "EAR_THRESH": 0.25,
+  "CONSEC_FRAMES": 15,
+  "ALARM_VOLUME": 1.0,
+  "CAM_INDEX": 0,
+  "use_custom_alarm": false
+}
