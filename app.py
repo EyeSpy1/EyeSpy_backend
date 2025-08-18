@@ -4,6 +4,8 @@ import io
 import cv2
 import dlib
 import numpy as np
+import pandas as pd
+
 import sqlite3
 import hashlib
 import streamlit as st
@@ -107,6 +109,38 @@ def get_user_sessions(username):
     rows = c.fetchall()
     conn.close()
     return rows
+def get_user_sessions_full(username):
+    """Get recent sessions including session_data JSON (EAR history)."""
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("""
+        SELECT session_date, total_time, drowsiness_events, avg_ear, min_ear, max_ear, session_data
+        FROM user_sessions
+        WHERE username = ?
+        ORDER BY session_date DESC
+        LIMIT 50
+    """, (username,))
+    rows = c.fetchall()
+    conn.close()
+    return rows
+
+def get_session_ear_history(username, session_date):
+    """Return list of EAR values for the given session timestamp."""
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("""
+        SELECT session_data FROM user_sessions
+        WHERE username = ? AND session_date = ?
+        LIMIT 1
+    """, (username, session_date))
+    row = c.fetchone()
+    conn.close()
+    if not row or not row[0]:
+        return []
+    try:
+        return json.loads(row[0])
+    except Exception:
+        return []
 
 def hash_password(password, salt=None):
     salt = salt or os.urandom(16).hex()
@@ -137,6 +171,19 @@ for key, val in [
     ("debug", False), ("ear_values", []), ("alarm_array", None), ("camera_running", False),
     ("current_ear", 0.0), ("left_ear", 0.0), ("right_ear", 0.0), ("custom_audio_b64", None),
     ("session_start_time", None), ("drowsiness_count", 0), ("ear_history", [])
+]:
+    if key not in st.session_state:
+        st.session_state[key] = val
+# --- NEW: Adaptive threshold session defaults ---
+for key, val in [
+    ("adaptive_on", False),
+    ("calib_seconds", 20),         # how long to learn your baseline
+    ("drop_percent", 25),          # threshold = baseline_mean * (1 - drop_percent/100)
+    ("min_adapt_thresh", 0.15),    # safety floor
+    ("max_adapt_thresh", 0.35),    # safety ceiling
+    ("baseline_buffer", []),       # collects EAR during calibration
+    ("effective_ear_thresh", None),# computed adaptive threshold
+    ("baseline_ready", False),     # becomes True after calibration
 ]:
     if key not in st.session_state:
         st.session_state[key] = val
@@ -229,7 +276,7 @@ else:
         st.header("Settings")
         EAR_THRESH = st.slider("Eye Aspect Ratio Threshold", 0.15, 0.40, 0.25, 0.01)
         CONSEC_FRAMES = st.slider("Consecutive Frames", 5, 30, 15, 1)
-        
+
         st.write("---")
         st.subheader("Custom Audio")
         uploaded_audio = st.file_uploader("Upload Custom Alarm Audio", type=['wav', 'mp3', 'ogg', 'flac'])
@@ -239,18 +286,42 @@ else:
                 if custom_b64:
                     st.session_state.custom_audio_b64 = custom_b64
                     st.success("Custom audio uploaded successfully!")
-        
+
         if st.session_state.custom_audio_b64:
             if st.button("Reset to Default Audio"):
                 st.session_state.custom_audio_b64 = None
                 st.success("Reset to default beep sound!")
-        
+
         st.write("---")
         if st.button("Log Out"):
             st.session_state.authenticated = False
             st.session_state.username = ""
             st.session_state.camera_running = False
             st.experimental_rerun()
+
+        st.write("---")
+        st.subheader("Adaptive Threshold (Smart)")
+        
+        # 👇 YAHAN PE calibration duration daalo
+        st.session_state.calib_seconds = st.number_input(
+            "Calibration Duration (secs)",
+            min_value=5, max_value=120,
+            value=int(st.session_state.get("calib_seconds", 20)),
+            step=1
+        )
+
+        st.session_state.adaptive_on = st.checkbox("Enable Adaptive EAR Threshold", value=st.session_state.adaptive_on)
+        st.session_state.drop_percent = st.slider("Drop % from Baseline", 5, 50, int(st.session_state.drop_percent), 1)
+        st.session_state.min_adapt_thresh = st.number_input("Min Threshold Clamp", 0.10, 0.30, float(st.session_state.min_adapt_thresh), 0.01)
+        st.session_state.max_adapt_thresh = st.number_input("Max Threshold Clamp", 0.25, 0.50, float(st.session_state.max_adapt_thresh), 0.01)
+
+        # Display the currently used threshold
+        if st.session_state.adaptive_on and st.session_state.baseline_ready and st.session_state.effective_ear_thresh:
+            st.success(f"Adaptive Threshold: {st.session_state.effective_ear_thresh:.3f}")
+        elif st.session_state.adaptive_on:
+            st.info("Adaptive Threshold: calibrating… (using slider until ready)")
+        else:
+            st.caption("Adaptive off: using slider value above.")
 
     # Main content tabs
     tab1, tab2 = st.tabs(["Live Detection", "Session History"])
@@ -268,15 +339,17 @@ else:
         # Controls
         col1, col2 = st.columns(2)
         with col1:
-            if not st.session_state.camera_running:
-                if st.button("🎥 Start Camera & Detection", key="start_btn"):
-                    st.session_state.camera_running = True
-                    st.session_state.session_start_time = time.time()
-                    st.session_state.drowsiness_count = 0
-                    st.session_state.ear_history = []
-                    st.experimental_rerun()
-            else:
-                st.button("🎥 Start Camera & Detection", disabled=True)
+            if st.button("🎥 Start Camera & Detection", key="start_btn"):
+                st.session_state.camera_running = True
+                st.session_state.session_start_time = time.time()
+                st.session_state.drowsiness_count = 0
+                st.session_state.ear_history = []
+                # --- NEW: reset adaptive calibration ---
+                st.session_state.baseline_buffer = []
+                st.session_state.effective_ear_thresh = None
+                st.session_state.baseline_ready = False
+                st.experimental_rerun()
+
         
         with col2:
             if st.session_state.camera_running:
@@ -339,8 +412,7 @@ else:
                     while st.session_state.camera_running:
                         ret, frame = cap.read()
                         if not ret:
-                            st.error("❌ Can't receive frame (stream end?). Stopping camera.")
-                            st.session_state.camera_running = False
+                            st.error("Camera disconnected. Please restart monitoring.")
                             break
 
                         frame_count += 1
@@ -378,6 +450,26 @@ else:
                             st.session_state.left_ear = left_ear
                             st.session_state.right_ear = right_ear
                             st.session_state.current_ear = ear
+                                                        # --- NEW: Adaptive threshold calibration/compute ---
+                            # Only calibrate for the first N seconds of the session
+                            if st.session_state.adaptive_on and st.session_state.session_start_time:
+                                elapsed = time.time() - st.session_state.session_start_time
+                                if not st.session_state.baseline_ready:
+                                    # keep only valid EARs during calibration window
+                                    if 0.05 < ear < 0.6:  # sanity filter
+                                        st.session_state.baseline_buffer.append(ear)
+
+                                    # when calibration time passes and we have enough samples, compute baseline
+                                    if elapsed >= st.session_state.calib_seconds and len(st.session_state.baseline_buffer) >= 60:
+                                        baseline_mean = float(np.mean(st.session_state.baseline_buffer))
+                                        # threshold as a percentage drop from your baseline mean
+                                        raw_thresh = baseline_mean * (1.0 - (st.session_state.drop_percent / 100.0))
+                                        # clamp to safe range
+                                        clamped = max(st.session_state.min_adapt_thresh, min(st.session_state.max_adapt_thresh, raw_thresh))
+                                        st.session_state.effective_ear_thresh = clamped
+                                        st.session_state.baseline_ready = True
+                                # If calibration not ready yet, do nothing (will use slider EAR_THRESH)
+
                             
                             # Store EAR history for analytics
                             st.session_state.ear_history.append(ear)
@@ -389,19 +481,25 @@ else:
                             cv2.drawContours(frame, [right_eye], -1, (0, 255, 0), 1)
                             
                             # Drowsiness detection
-                            if ear < EAR_THRESH:
+                                                        # --- NEW: choose threshold (adaptive if ready, else slider) ---
+                            thr = st.session_state.effective_ear_thresh if (st.session_state.adaptive_on and st.session_state.baseline_ready and st.session_state.effective_ear_thresh) else EAR_THRESH
+
+                            # Drowsiness detection
+                            if "baseline_dx" not in st.session_state:
+                                st.session_state.baseline_dx = None
+                            if "baseline_dy" not in st.session_state:
+                                st.session_state.baseline_dy = None
+
+                            if ear < thr:
                                 counter += 1
                                 if counter >= CONSEC_FRAMES:
-                                    if not st.session_state.alarm_on:  # New drowsiness event
+                                    if not st.session_state.alarm_on:
                                         st.session_state.drowsiness_count += 1
                                     st.session_state.alarm_on = True
-                                    
-                                    # Create red overlay for drowsiness
+                                    # (existing overlay + text code unchanged)
                                     overlay = frame.copy()
                                     cv2.rectangle(overlay, (0, 0), (w, h), (0, 0, 255), -1)
                                     frame = cv2.addWeighted(overlay, 0.3, frame, 0.7, 0)
-                                    
-                                    # Add warning text
                                     text = "DROWSINESS DETECTED!"
                                     text_size = cv2.getTextSize(text, cv2.FONT_HERSHEY_TRIPLEX, 1.5, 3)[0]
                                     text_x = (w - text_size[0]) // 2
@@ -411,9 +509,49 @@ else:
                             else:
                                 counter = 0
                                 st.session_state.alarm_on = False
+                                                        
+                                                        # Nose & chin points for head pose
+                                                        # Nose & chin points for head pose
+                            nose_point = (shape.part(30).x, shape.part(30).y)
+                            chin_point = (shape.part(8).x, shape.part(8).y)
+
+                            dx = nose_point[0] - chin_point[0]
+                            dy = nose_point[1] - chin_point[1]
+
+                            # ✅ Calibration step: store baseline if not set yet
+                            if st.session_state.baseline_dx is None or st.session_state.baseline_dy is None:
+                                st.session_state.baseline_dx = dx
+                                st.session_state.baseline_dy = dy
+
+                            # ✅ Normalize dx, dy with respect to baseline
+                            dx = dx - st.session_state.baseline_dx
+                            dy = dy - st.session_state.baseline_dy
+
+                            X_THRESHOLD = 25
+                            Y_UP = -20   # thoda negative (up)
+                            Y_DOWN = 20  # thoda positive (down)
+
+                            if abs(dx) > X_THRESHOLD:
+                                cv2.putText(frame, "DISTRACTION ALERT (Side View!)", (50,100),
+                                            cv2.FONT_HERSHEY_SIMPLEX, 1, (0,0,255), 3)
+
+                            elif dy < Y_UP:
+                                cv2.putText(frame, "DISTRACTION ALERT (Looking Up!)", (50,150),
+                                            cv2.FONT_HERSHEY_SIMPLEX, 1, (0,0,255), 3)
+
+                            elif dy > Y_DOWN:
+                                cv2.putText(frame, "DISTRACTION ALERT (Looking Down/Mobile!)", (50,200),
+                                            cv2.FONT_HERSHEY_SIMPLEX, 1, (0,0,255), 3)
+
+
 
                         # Draw statistics on frame
                         cv2.putText(frame, f"EAR: {ear:.2f}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 0), 2)
+                                                # --- NEW: show which threshold is in use ---
+                        thr_disp = st.session_state.effective_ear_thresh if (st.session_state.adaptive_on and st.session_state.baseline_ready and st.session_state.effective_ear_thresh) else EAR_THRESH
+                        cv2.putText(frame, f"THR: {thr_disp:.2f} ({'A' if (st.session_state.adaptive_on and st.session_state.baseline_ready) else 'S'})",
+                                    (10, 130), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,0,0), 2)
+
                         cv2.putText(frame, f"L: {left_ear:.2f}  R: {right_ear:.2f}", (10, 55), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 128, 255), 2)
                         cv2.putText(frame, f"Counter: {counter}", (10, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 0), 2)
                         
@@ -460,9 +598,18 @@ else:
                     st.session_state.camera_running = False
                 finally:
                     cap.release()
-                    cv2.destroyAllWindows()
+                    try:
+                        cv2.destroyAllWindows()
+                    except:
+                        pass
+
                     if st.session_state.camera_running:
                         st.session_state.camera_running = False
+                                            # --- NEW: clear adaptive state on stop ---
+                        st.session_state.baseline_buffer = []
+                        st.session_state.effective_ear_thresh = None
+                        st.session_state.baseline_ready = False
+
                         st.experimental_rerun()
 
         else:
@@ -500,3 +647,123 @@ else:
                             st.success("✅ Good Session")
         else:
             st.info("No session data available. Start a detection session to see your history!")
+                # ---------- NEW: Export full history (summary) ----------
+        st.write("---")
+        st.markdown("#### Export History")
+
+        # fetch extended rows including JSON to build a friendly CSV
+        sessions_full = get_user_sessions_full(st.session_state.username)
+        if sessions_full:
+            # Build a flat table for export (JSON length only, not full timeseries)
+            export_rows = []
+            for (session_date, total_time, drowsiness_events, avg_ear, min_ear, max_ear, session_data) in sessions_full:
+                try:
+                    ear_list = json.loads(session_data) if session_data else []
+                except Exception:
+                    ear_list = []
+                export_rows.append({
+                    "session_date": session_date,
+                    "total_time_secs": total_time,
+                    "drowsiness_events": drowsiness_events,
+                    "avg_ear": avg_ear,
+                    "min_ear": min_ear,
+                    "max_ear": max_ear,
+                    "ear_points": len(ear_list)
+                })
+            df_export = pd.DataFrame(export_rows)
+
+            csv_bytes = df_export.to_csv(index=False).encode("utf-8")
+            st.download_button(
+                label="⬇️ Download History (CSV)",
+                data=csv_bytes,
+                file_name=f"{st.session_state.username}_drowsiness_history.csv",
+                mime="text/csv",
+                help="Exports recent session summaries (not per-point EAR)."
+            )
+        else:
+            st.info("No data to export yet.")
+                # ---------- NEW: Trends & Analytics ----------
+        st.write("---")
+        st.markdown("### 📊 Session Trends & Analytics")
+
+        sessions = get_user_sessions(st.session_state.username)
+        if sessions:
+            # Convert to DataFrame for easier plotting
+            df_trend = pd.DataFrame(sessions, columns=[
+                "session_date", "total_time", "drowsiness_events", "avg_ear", "min_ear", "max_ear"
+            ])
+
+            # Format datetime
+            try:
+                df_trend["session_date"] = pd.to_datetime(df_trend["session_date"])
+            except Exception:
+                pass  # keep raw strings if parsing fails
+
+            # Show key trends
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric("Avg Session Time", f"{df_trend['total_time'].mean():.1f}s")
+            with col2:
+                st.metric("Avg Events/Session", f"{df_trend['drowsiness_events'].mean():.2f}")
+            with col3:
+                st.metric("Best EAR", f"{df_trend['max_ear'].max():.3f}")
+
+            # Trend 1: Drowsiness Events Over Time
+            st.subheader("Drowsiness Events Over Time")
+            st.line_chart(df_trend.set_index("session_date")["drowsiness_events"])
+
+            # Trend 2: Average EAR Over Time
+            st.subheader("Average EAR Over Time")
+            st.line_chart(df_trend.set_index("session_date")["avg_ear"])
+
+            # Trend 3: Session Duration Over Time
+            st.subheader("Session Duration (secs) Over Time")
+            st.bar_chart(df_trend.set_index("session_date")["total_time"])
+        else:
+            st.info("No session data available yet for analytics.")
+
+
+        # ---------- NEW: Session-by-session graph & per-session export ----------
+        st.write("---")
+        st.markdown("#### Session-wise EAR Graph")
+
+        if sessions_full:
+            # A small selector to pick a session for plotting
+            # Show most recent first; display a neat label
+            def _fmt_label(sd, tt, ev):
+                try:
+                    dt = datetime.fromisoformat(sd)
+                    dstr = dt.strftime("%Y-%m-%d %H:%M:%S")
+                except:
+                    dstr = sd
+                return f"{dstr} | {tt}s | events: {ev}"
+
+            session_labels = [
+                _fmt_label(sd, tt, ev) for (sd, tt, ev, *_rest) in [(row[0], row[1], row[2]) for row in sessions_full]
+            ]
+            selected = st.selectbox("Pick a session to visualize", options=session_labels, index=0)
+
+            # Map label back to session_date
+            sel_idx = session_labels.index(selected)
+            selected_session_date = sessions_full[sel_idx][0]
+
+            # Fetch EAR history and plot
+            ear_series = get_session_ear_history(st.session_state.username, selected_session_date)
+            if ear_series:
+                st.caption("EAR across frames (lower EAR ≈ eyes closed).")
+                st.line_chart(ear_series)
+
+                # Per-session export: full EAR timeseries
+                per_rows = [{"frame_index": i, "ear": v} for i, v in enumerate(ear_series)]
+                df_per = pd.DataFrame(per_rows)
+                per_csv = df_per.to_csv(index=False).encode("utf-8")
+                safe_dt = selected_session_date.replace(":", "-")
+                st.download_button(
+                    label="⬇️ Download this session's EAR (CSV)",
+                    data=per_csv,
+                    file_name=f"{st.session_state.username}_EAR_{safe_dt}.csv",
+                    mime="text/csv",
+                    help="Exports frame-wise EAR values for the selected session."
+                )
+            else:
+                st.warning("No EAR history stored for this session.")
