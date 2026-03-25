@@ -12,6 +12,9 @@ import streamlit as st
 from scipy.spatial import distance as dist
 from pydub import AudioSegment
 import base64
+from streamlit_webrtc import webrtc_streamer, VideoTransformerBase, RTCConfiguration
+import av
+import threading
 import time
 import json
 from datetime import datetime
@@ -222,6 +225,135 @@ def audio_file_to_base64(audio_file):
 
 _beep_b64 = create_beep_wavbase64()
 
+# --- WebRTC Setup ---
+RTC_CONFIGURATION = RTCConfiguration(
+    {"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]}
+)
+
+class DrowsinessProcessor(VideoTransformerBase):
+    def __init__(self):
+        self.EAR_THRESH = 0.25
+        self.CONSEC_FRAMES = 15
+        self.adaptive_on = False
+        self.calib_seconds = 20
+        self.drop_percent = 25
+        self.min_adapt_thresh = 0.15
+        self.max_adapt_thresh = 0.35
+        
+        self.counter = 0
+        self.alarm_on = False
+        self.current_ear = 0.0
+        self.left_ear = 0.0
+        self.right_ear = 0.0
+        self.drowsiness_count = 0
+        self.session_start_time = time.time()
+        
+        self.ear_history = []
+        self.baseline_buffer = []
+        self.baseline_ready = False
+        self.effective_ear_thresh = None
+        self.baseline_dx = None
+        self.baseline_dy = None
+
+    def recv(self, frame):
+        img = frame.to_ndarray(format="bgr24")
+        h, w = img.shape[:2]
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        
+        if face_detection_ready:
+            faces = detector(gray, 0)
+            
+            if not faces:
+                self.counter = 0
+                self.alarm_on = False
+            
+            for face in faces:
+                shape = predictor(gray, face)
+                shape_np = np.array([(shape.part(i).x, shape.part(i).y) for i in range(68)])
+                
+                for (x, y) in shape_np:
+                    cv2.circle(img, (x, y), 2, (0, 255, 255), -1)
+                
+                left_eye = shape_np[42:48]
+                right_eye = shape_np[36:42]
+                
+                left_ear = eye_aspect_ratio(left_eye)
+                right_ear = eye_aspect_ratio(right_eye)
+                ear = (left_ear + right_ear) / 2.0
+                
+                self.left_ear = left_ear
+                self.right_ear = right_ear
+                self.current_ear = ear
+                
+                if self.adaptive_on:
+                    elapsed = time.time() - self.session_start_time
+                    if not self.baseline_ready:
+                        if 0.05 < ear < 0.6:
+                            self.baseline_buffer.append(ear)
+                        if elapsed >= self.calib_seconds and len(self.baseline_buffer) >= 60:
+                            baseline_mean = float(np.mean(self.baseline_buffer))
+                            raw_thresh = baseline_mean * (1.0 - (self.drop_percent / 100.0))
+                            clamped = max(self.min_adapt_thresh, min(self.max_adapt_thresh, raw_thresh))
+                            self.effective_ear_thresh = clamped
+                            self.baseline_ready = True
+
+                self.ear_history.append(ear)
+                if len(self.ear_history) > 1000:
+                    self.ear_history = self.ear_history[-1000:]
+                
+                cv2.drawContours(img, [left_eye], -1, (0, 255, 0), 1)
+                cv2.drawContours(img, [right_eye], -1, (0, 255, 0), 1)
+                
+                thr = self.effective_ear_thresh if (self.adaptive_on and self.baseline_ready and self.effective_ear_thresh) else self.EAR_THRESH
+                
+                if ear < thr:
+                    self.counter += 1
+                    if self.counter >= self.CONSEC_FRAMES:
+                        if not self.alarm_on:
+                            self.drowsiness_count += 1
+                        self.alarm_on = True
+                        overlay = img.copy()
+                        cv2.rectangle(overlay, (0, 0), (w, h), (0, 0, 255), -1)
+                        img = cv2.addWeighted(overlay, 0.3, img, 0.7, 0)
+                        text = "DROWSINESS DETECTED!"
+                        text_size = cv2.getTextSize(text, cv2.FONT_HERSHEY_TRIPLEX, 1.5, 3)[0]
+                        text_x = (w - text_size[0]) // 2
+                        text_y = (h + text_size[1]) // 2
+                        cv2.putText(img, text, (text_x, text_y), cv2.FONT_HERSHEY_TRIPLEX, 1.5, (255, 255, 255), 3)
+                        cv2.rectangle(img, (0, 0), (w, h), (0, 0, 255), 10)
+                else:
+                    self.counter = 0
+                    self.alarm_on = False
+
+                nose_point = (shape.part(30).x, shape.part(30).y)
+                chin_point = (shape.part(8).x, shape.part(8).y)
+                dx = nose_point[0] - chin_point[0]
+                dy = nose_point[1] - chin_point[1]
+
+                if self.baseline_dx is None or self.baseline_dy is None:
+                    self.baseline_dx = dx
+                    self.baseline_dy = dy
+
+                dx = dx - self.baseline_dx
+                dy = dy - self.baseline_dy
+
+                if abs(dx) > 25:
+                    cv2.putText(img, "DISTRACTION ALERT (Side View!)", (50,100), cv2.FONT_HERSHEY_SIMPLEX, 1, (0,0,255), 3)
+                elif dy < -20:
+                    cv2.putText(img, "DISTRACTION ALERT (Looking Up!)", (50,150), cv2.FONT_HERSHEY_SIMPLEX, 1, (0,0,255), 3)
+                elif dy > 20:
+                    cv2.putText(img, "DISTRACTION ALERT (Looking Down/Mobile!)", (50,200), cv2.FONT_HERSHEY_SIMPLEX, 1, (0,0,255), 3)
+
+            cv2.putText(img, f"EAR: {self.current_ear:.2f}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 0), 2)
+            thr_disp = self.effective_ear_thresh if (self.adaptive_on and self.baseline_ready and self.effective_ear_thresh) else self.EAR_THRESH
+            cv2.putText(img, f"THR: {thr_disp:.2f} ({'A' if (self.adaptive_on and self.baseline_ready) else 'S'})", (10, 130), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,0,0), 2)
+            cv2.putText(img, f"L: {self.left_ear:.2f}  R: {self.right_ear:.2f}", (10, 55), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 128, 255), 2)
+            cv2.putText(img, f"Counter: {self.counter}", (10, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 0), 2)
+            session_time = int(time.time() - self.session_start_time)
+            cv2.putText(img, f"Time: {session_time}s  Events: {self.drowsiness_count}", (10, 105), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
+
+        return av.VideoFrame.from_ndarray(img, format="bgr24")
+
 # --- Auth UI ---
 if not st.session_state.authenticated:
     st.title("👁️ Driver Drowsiness Detector")
@@ -327,293 +459,49 @@ else:
     tab1, tab2 = st.tabs(["Live Detection", "Session History"])
     
     with tab1:
-        st.markdown("### Live Drowsiness Detection (OpenCV fallback)")
-        st.info("This uses your local webcam via OpenCV. Click 'Start Camera & Detection' then allow camera access.")
+        st.markdown("### Live Drowsiness Detection (WebRTC Ready)")
+        st.info("This uses your browser's webcam via WebRTC. It works perfectly on phones and laptops!")
 
-        # Show current status
-        if st.session_state.camera_running:
-            st.success("🟢 Camera is running")
-        else:
-            st.info("🔴 Camera is stopped")
+        ctx = webrtc_streamer(
+            key="drowsiness-detection",
+            video_processor_factory=DrowsinessProcessor,
+            rtc_configuration=RTC_CONFIGURATION,
+            media_stream_constraints={"video": True, "audio": False},
+        )
 
-        # Controls
-        col1, col2 = st.columns(2)
-        with col1:
-            if st.button("🎥 Start Camera & Detection", key="start_btn"):
-                st.session_state.camera_running = True
-                st.session_state.session_start_time = time.time()
-                st.session_state.drowsiness_count = 0
-                st.session_state.ear_history = []
-                # --- NEW: reset adaptive calibration ---
-                st.session_state.baseline_buffer = []
-                st.session_state.effective_ear_thresh = None
-                st.session_state.baseline_ready = False
-                st.experimental_rerun()
+        if ctx.state.playing:
+            st.success("🟢 Camera is running in your browser")
+            if ctx.video_processor:
+                # Sync UI settings to the processing thread
+                ctx.video_processor.EAR_THRESH = EAR_THRESH
+                ctx.video_processor.CONSEC_FRAMES = CONSEC_FRAMES
+                ctx.video_processor.calib_seconds = st.session_state.calib_seconds
+                ctx.video_processor.adaptive_on = st.session_state.adaptive_on
+                ctx.video_processor.drop_percent = st.session_state.drop_percent
+                ctx.video_processor.min_adapt_thresh = st.session_state.min_adapt_thresh
+                ctx.video_processor.max_adapt_thresh = st.session_state.max_adapt_thresh
 
-        
-        with col2:
-            if st.session_state.camera_running:
-                if st.button("⏹️ Stop Camera", key="stop_btn"):
-                    st.session_state.camera_running = False
+                # Save session logic
+                st.markdown("---")
+                if st.button("💾 Save Diagnostic Session to History"):
+                    session_duration = time.time() - ctx.video_processor.session_start_time
+                    avg_ear = sum(ctx.video_processor.ear_history) / len(ctx.video_processor.ear_history) if ctx.video_processor.ear_history else 0.0
+                    min_ear = min(ctx.video_processor.ear_history) if ctx.video_processor.ear_history else 0.0
+                    max_ear = max(ctx.video_processor.ear_history) if ctx.video_processor.ear_history else 0.0
                     
-                    # Save session data when stopping
-                    if st.session_state.session_start_time:
-                        session_duration = time.time() - st.session_state.session_start_time
-                        if st.session_state.ear_history:
-                            avg_ear = sum(st.session_state.ear_history) / len(st.session_state.ear_history)
-                            min_ear = min(st.session_state.ear_history)
-                            max_ear = max(st.session_state.ear_history)
-                        else:
-                            avg_ear = min_ear = max_ear = 0.0
-                        
-                        session_data = {
-                            'session_date': datetime.now().isoformat(),
-                            'total_time': int(session_duration),
-                            'drowsiness_events': st.session_state.drowsiness_count,
-                            'avg_ear': avg_ear,
-                            'min_ear': min_ear,
-                            'max_ear': max_ear,
-                            'ear_history': st.session_state.ear_history[-100:]  # Keep last 100 readings
-                        }
-                        save_session_data(st.session_state.username, session_data)
-                        st.success(f"Session saved! Duration: {int(session_duration)}s, Drowsiness events: {st.session_state.drowsiness_count}")
-                    
-                    # Reset session variables
-                    st.session_state.session_start_time = None
-                    st.session_state.drowsiness_count = 0
-                    st.session_state.ear_history = []
-                    st.experimental_rerun()
-            else:
-                st.button("⏹️ Stop Camera", disabled=True)
-
-        # Main camera loop
-        if st.session_state.camera_running:
-            st.info("🎥 Initializing camera...")
-            
-            cap = cv2.VideoCapture(0)
-            if not cap.isOpened():
-                st.error("❌ Cannot open camera (index 0). Close other apps using camera or try a different camera index.")
-                st.session_state.camera_running = False
-                st.experimental_rerun()
-            else:
-                st.success("✅ Camera connected successfully!")
-                
-                try:
-                    # placeholders (create ONCE outside loop)
-                    img_placeholder = st.empty()
-                    status1 = st.empty() 
-                    status2 = st.empty()
-                    audio_placeholder = st.empty()
-
-                    counter = 0
-                    prev_alarm = False
-                    frame_count = 0
-
-                    while st.session_state.camera_running:
-                        ret, frame = cap.read()
-                        if not ret:
-                            st.error("Camera disconnected. Please restart monitoring.")
-                            break
-
-                        frame_count += 1
-                        
-                        # detection
-                        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-                        h, w = frame.shape[:2]
-                        faces = detector(gray, 0)
-                        ear = 0.0
-                        left_ear = 0.0
-                        right_ear = 0.0
-
-                        if not faces:
-                            counter = 0
-                            st.session_state.alarm_on = False
-                        
-                        for face in faces:
-                            shape = predictor(gray, face)
-                            shape_np = np.array([(shape.part(i).x, shape.part(i).y) for i in range(68)])
-                            
-                            # Draw face landmarks
-                            for (x, y) in shape_np:
-                                cv2.circle(frame, (x, y), 2, (0, 255, 255), -1)
-                            
-                            # Extract eye regions
-                            left_eye = shape_np[42:48]
-                            right_eye = shape_np[36:42]
-                            
-                            # Calculate EAR
-                            left_ear = eye_aspect_ratio(left_eye)
-                            right_ear = eye_aspect_ratio(right_eye)
-                            ear = (left_ear + right_ear) / 2.0
-                            
-                            # Update session state
-                            st.session_state.left_ear = left_ear
-                            st.session_state.right_ear = right_ear
-                            st.session_state.current_ear = ear
-                                                        # --- NEW: Adaptive threshold calibration/compute ---
-                            # Only calibrate for the first N seconds of the session
-                            if st.session_state.adaptive_on and st.session_state.session_start_time:
-                                elapsed = time.time() - st.session_state.session_start_time
-                                if not st.session_state.baseline_ready:
-                                    # keep only valid EARs during calibration window
-                                    if 0.05 < ear < 0.6:  # sanity filter
-                                        st.session_state.baseline_buffer.append(ear)
-
-                                    # when calibration time passes and we have enough samples, compute baseline
-                                    if elapsed >= st.session_state.calib_seconds and len(st.session_state.baseline_buffer) >= 60:
-                                        baseline_mean = float(np.mean(st.session_state.baseline_buffer))
-                                        # threshold as a percentage drop from your baseline mean
-                                        raw_thresh = baseline_mean * (1.0 - (st.session_state.drop_percent / 100.0))
-                                        # clamp to safe range
-                                        clamped = max(st.session_state.min_adapt_thresh, min(st.session_state.max_adapt_thresh, raw_thresh))
-                                        st.session_state.effective_ear_thresh = clamped
-                                        st.session_state.baseline_ready = True
-                                # If calibration not ready yet, do nothing (will use slider EAR_THRESH)
-
-                            
-                            # Store EAR history for analytics
-                            st.session_state.ear_history.append(ear)
-                            if len(st.session_state.ear_history) > 1000:  # Keep only last 1000 readings
-                                st.session_state.ear_history = st.session_state.ear_history[-1000:]
-                            
-                            # Draw eye contours
-                            cv2.drawContours(frame, [left_eye], -1, (0, 255, 0), 1)
-                            cv2.drawContours(frame, [right_eye], -1, (0, 255, 0), 1)
-                            
-                            # Drowsiness detection
-                                                        # --- NEW: choose threshold (adaptive if ready, else slider) ---
-                            thr = st.session_state.effective_ear_thresh if (st.session_state.adaptive_on and st.session_state.baseline_ready and st.session_state.effective_ear_thresh) else EAR_THRESH
-
-                            # Drowsiness detection
-                            if "baseline_dx" not in st.session_state:
-                                st.session_state.baseline_dx = None
-                            if "baseline_dy" not in st.session_state:
-                                st.session_state.baseline_dy = None
-
-                            if ear < thr:
-                                counter += 1
-                                if counter >= CONSEC_FRAMES:
-                                    if not st.session_state.alarm_on:
-                                        st.session_state.drowsiness_count += 1
-                                    st.session_state.alarm_on = True
-                                    # (existing overlay + text code unchanged)
-                                    overlay = frame.copy()
-                                    cv2.rectangle(overlay, (0, 0), (w, h), (0, 0, 255), -1)
-                                    frame = cv2.addWeighted(overlay, 0.3, frame, 0.7, 0)
-                                    text = "DROWSINESS DETECTED!"
-                                    text_size = cv2.getTextSize(text, cv2.FONT_HERSHEY_TRIPLEX, 1.5, 3)[0]
-                                    text_x = (w - text_size[0]) // 2
-                                    text_y = (h + text_size[1]) // 2
-                                    cv2.putText(frame, text, (text_x, text_y), cv2.FONT_HERSHEY_TRIPLEX, 1.5, (255, 255, 255), 3)
-                                    cv2.rectangle(frame, (0, 0), (w, h), (0, 0, 255), 10)
-                            else:
-                                counter = 0
-                                st.session_state.alarm_on = False
-                                                        
-                                                        # Nose & chin points for head pose
-                                                        # Nose & chin points for head pose
-                            nose_point = (shape.part(30).x, shape.part(30).y)
-                            chin_point = (shape.part(8).x, shape.part(8).y)
-
-                            dx = nose_point[0] - chin_point[0]
-                            dy = nose_point[1] - chin_point[1]
-
-                            # ✅ Calibration step: store baseline if not set yet
-                            if st.session_state.baseline_dx is None or st.session_state.baseline_dy is None:
-                                st.session_state.baseline_dx = dx
-                                st.session_state.baseline_dy = dy
-
-                            # ✅ Normalize dx, dy with respect to baseline
-                            dx = dx - st.session_state.baseline_dx
-                            dy = dy - st.session_state.baseline_dy
-
-                            X_THRESHOLD = 25
-                            Y_UP = -20   # thoda negative (up)
-                            Y_DOWN = 20  # thoda positive (down)
-
-                            if abs(dx) > X_THRESHOLD:
-                                cv2.putText(frame, "DISTRACTION ALERT (Side View!)", (50,100),
-                                            cv2.FONT_HERSHEY_SIMPLEX, 1, (0,0,255), 3)
-
-                            elif dy < Y_UP:
-                                cv2.putText(frame, "DISTRACTION ALERT (Looking Up!)", (50,150),
-                                            cv2.FONT_HERSHEY_SIMPLEX, 1, (0,0,255), 3)
-
-                            elif dy > Y_DOWN:
-                                cv2.putText(frame, "DISTRACTION ALERT (Looking Down/Mobile!)", (50,200),
-                                            cv2.FONT_HERSHEY_SIMPLEX, 1, (0,0,255), 3)
-
-
-
-                        # Draw statistics on frame
-                        cv2.putText(frame, f"EAR: {ear:.2f}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 0), 2)
-                                                # --- NEW: show which threshold is in use ---
-                        thr_disp = st.session_state.effective_ear_thresh if (st.session_state.adaptive_on and st.session_state.baseline_ready and st.session_state.effective_ear_thresh) else EAR_THRESH
-                        cv2.putText(frame, f"THR: {thr_disp:.2f} ({'A' if (st.session_state.adaptive_on and st.session_state.baseline_ready) else 'S'})",
-                                    (10, 130), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,0,0), 2)
-
-                        cv2.putText(frame, f"L: {left_ear:.2f}  R: {right_ear:.2f}", (10, 55), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 128, 255), 2)
-                        cv2.putText(frame, f"Counter: {counter}", (10, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 0), 2)
-                        
-                        # Show session info
-                        if st.session_state.session_start_time:
-                            session_time = int(time.time() - st.session_state.session_start_time)
-                            cv2.putText(frame, f"Time: {session_time}s  Events: {st.session_state.drowsiness_count}", (10, 105), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
-                        else:
-                            session_time = 0
-
-                        # Update display (no reflow)
-                        img_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                        img_placeholder.image(img_rgb, use_column_width=True)
-
-                        # Update status
-                        if st.session_state.alarm_on:
-                            status1.error("⚠️ DROWSINESS DETECTED! ⚠️")
-                        else:
-                            status1.success("✅ Monitoring...")
-
-                        status2.markdown(f"**EAR:** `{st.session_state.current_ear:.3f}` **L:** `{st.session_state.left_ear:.3f}` **R:** `{st.session_state.right_ear:.3f}` | **Time:** {session_time}s **Events:** {st.session_state.drowsiness_count}")
-
-                        # Handle audio (only on state change to prevent page jump)
-                        if st.session_state.alarm_on != prev_alarm:
-                            if st.session_state.alarm_on:
-                                # Use custom audio if available, otherwise default beep
-                                audio_b64 = st.session_state.custom_audio_b64 if st.session_state.custom_audio_b64 else _beep_b64
-                                audio_html = f"""
-                                <audio autoplay loop>
-                                  <source src="data:audio/wav;base64,{audio_b64}" type="audio/wav">
-                                  Your browser does not support the audio element.
-                                </audio>
-                                """
-                                audio_placeholder.markdown(audio_html, unsafe_allow_html=True)
-                            else:
-                                audio_placeholder.empty()
-                            prev_alarm = st.session_state.alarm_on
-
-                        # Control frame rate (~30 FPS)
-                        time.sleep(0.03)
-
-                except Exception as e:
-                    st.error(f"❌ Camera loop error: {e}")
-                    st.session_state.camera_running = False
-                finally:
-                    cap.release()
-                    try:
-                        cv2.destroyAllWindows()
-                    except:
-                        pass
-
-                    if st.session_state.camera_running:
-                        st.session_state.camera_running = False
-                                            # --- NEW: clear adaptive state on stop ---
-                        st.session_state.baseline_buffer = []
-                        st.session_state.effective_ear_thresh = None
-                        st.session_state.baseline_ready = False
-
-                        st.experimental_rerun()
-
+                    session_data = {
+                        'session_date': datetime.now().isoformat(),
+                        'total_time': int(session_duration),
+                        'drowsiness_events': ctx.video_processor.drowsiness_count,
+                        'avg_ear': avg_ear,
+                        'min_ear': min_ear,
+                        'max_ear': max_ear,
+                        'ear_history': ctx.video_processor.ear_history[-100:]
+                    }
+                    save_session_data(st.session_state.username, session_data)
+                    st.success(f"Session saved! Duration: {int(session_duration)}s, Events: {ctx.video_processor.drowsiness_count}")
         else:
-            st.info("👆 Click 'Start Camera & Detection' to begin monitoring")
+            st.info("👆 Click 'START' on the video player above to begin monitoring.")
 
     with tab2:
         st.markdown("### Session History")
