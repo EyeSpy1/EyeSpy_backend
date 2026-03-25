@@ -1,9 +1,9 @@
-FROM python:3.11-slim
+FROM continuumio/miniconda3:latest
 
-# Install system dependencies
-# cmake and build-essential are required for dlib
-# ffmpeg is required for pydub to process audio
-# openblas and lapack are recommended for dlib performance
+# Set working directory
+WORKDIR /app
+
+# Install ffmpeg and build tools for other pip packages like 'av'
 RUN apt-get update && apt-get install -y \
     build-essential \
     cmake \
@@ -11,23 +11,13 @@ RUN apt-get update && apt-get install -y \
     pkg-config \
     libavformat-dev libavcodec-dev libavdevice-dev libavutil-dev \
     libswscale-dev libswresample-dev libavfilter-dev \
-    libopenblas-dev \
-    liblapack-dev \
-    libjpeg-dev \
-    libpng-dev \
-    libx11-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# Set working directory
-WORKDIR /app
+# Install dlib crucially via conda to get the PRE-COMPILED binary
+# This completely bypasses the 8GB RAM compilation limit (Out Of Memory Error) on Render!
+RUN conda install -y -c conda-forge python=3.11 dlib
 
-# Upgrade pip
-RUN pip install --upgrade pip
-
-# Create unbuffered environment variable for python
-ENV PYTHONUNBUFFERED=1
-
-# Copy requirements and install
+# Copy requirements and install via pip
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
@@ -37,5 +27,5 @@ COPY . .
 # Expose ports for Flask and Streamlit
 EXPOSE 8501 8502
 
-# The entrypoint leverages supervisord to start both Flask and Streamlit using the provided supervisord.conf
+# The entrypoint leverages supervisord to start both Flask and Streamlit simultaneously
 CMD ["supervisord", "-c", "supervisord.conf"]

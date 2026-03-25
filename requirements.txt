@@ -2,7 +2,6 @@
 streamlit==1.26.0
 streamlit-webrtc==0.47.0
 opencv-python-headless==4.8.0.76
-dlib==19.24.1
 scipy==1.11.1
 pydub==0.25.1
 numpy==1.26.4
